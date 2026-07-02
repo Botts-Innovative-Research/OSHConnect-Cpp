@@ -13,14 +13,12 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
-#include <condition_variable>
 #include <chrono>
+#include <condition_variable>
+#include <memory>
 
-#include <boost/beast/core.hpp>
-#include <boost/beast/websocket.hpp>
-#include <boost/asio/ip/tcp.hpp>
+#include <ixwebsocket/IXWebSocket.h>
 #include <CSAPI/DataModels/TimeExtent.h>
-#include <boost/beast/core/stream_traits.hpp>
 #include <nlohmann/json.hpp>
 
 #include "StreamStatus.h"
@@ -65,7 +63,7 @@ namespace OSHConnect::Websocket {
 
 		OSHDataStream dataStream;
 
-		// Configuration mutex protects: requestFormat, timeExtent, replaySpeed, connectionTimeout
+		// Configuration mutex protects: requestFormat, timeExtent, replaySpeed, connectionTimeout, maxReconnectAttempts
 		mutable std::mutex configMutex;
 		std::optional<Constants::RequestFormat> requestFormat;
 		std::optional<ConnectedSystemsAPI::DataModels::TimeExtent> timeExtent;
@@ -74,15 +72,12 @@ namespace OSHConnect::Websocket {
 		std::atomic<bool> autoReconnect{ false };
 		int maxReconnectAttempts = 3;
 
-		// WebSocket mutex protects: ioc, resolver, ws, ioThread, and connection operations
-		std::mutex wsMutex;
-		boost::asio::io_context ioc;
-		boost::asio::ip::tcp::resolver resolver{ ioc };
-		boost::beast::websocket::stream<boost::beast::tcp_stream> ws{ ioc };
-		std::unique_ptr<std::thread> ioThread;
+		// WebSocket mutex protects: webSocket and connection operations
+		mutable std::mutex wsMutex;
+		ix::WebSocket webSocket;
 
 		// Status listener mutex protects: statusListeners, nextListenerId
-		std::mutex listenerMutex;
+		mutable std::mutex listenerMutex;
 		using ListenerId = size_t;
 		std::unordered_map<ListenerId, StatusListener> statusListeners;
 		ListenerId nextListenerId = 0;
@@ -91,15 +86,19 @@ namespace OSHConnect::Websocket {
 		mutable std::mutex loggerMutex;
 		std::optional<LogCallback> logger;
 
-		// Thread management for async listening
-		std::mutex threadMutex;
-		std::unique_ptr<std::thread> listenerThread;
-		std::condition_variable stopCondition;
-
 		// Atomic state flags
 		std::atomic<bool> connected{ false };
 		std::atomic<bool> isShutdown{ false };
-		std::atomic<bool> stopListening{ false };
+
+		// Connection state synchronization
+		mutable std::mutex connectionMutex;
+		std::condition_variable connectionCV;
+		bool connectionAttemptComplete = false;
+
+		// Reconnection management
+		mutable std::mutex reconnectMutex;
+		std::unique_ptr<std::thread> reconnectThread;
+		std::atomic<bool> reconnectionInProgress{ false };
 
 		/// <summary>
 		/// Logs a message using the configured logger callback.
@@ -107,7 +106,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="message">The message to log.</param>
 		/// <param name="level">The log level.</param>
 		void log(const std::string& message, LogLevel level) const {
-			std::lock_guard<std::mutex> lock(loggerMutex);
+			std::lock_guard lock(loggerMutex);
 			if (logger.has_value()) {
 				try {
 					(*logger)(message, level);
@@ -132,12 +131,12 @@ namespace OSHConnect::Websocket {
 				throw std::invalid_argument("DataStream ID cannot be empty");
 			}
 
-			auto* system = dataStream.getParentSystem();
+			auto const* system = dataStream.getParentSystem();
 			if (system == nullptr) {
 				throw std::invalid_argument("DataStream parent system is null");
 			}
 
-			auto* node = system->getParentNode();
+			auto const* node = system->getParentNode();
 			if (node == nullptr) {
 				throw std::invalid_argument("System parent node is null");
 			}
@@ -150,14 +149,14 @@ namespace OSHConnect::Websocket {
 				throw std::invalid_argument("API endpoint is empty");
 			}
 
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			if (replaySpeed <= 0.0) {
 				log("Replay speed is zero or negative, no data will be received", LogLevel::WARNING);
 			}
 		}
 
 		std::string buildRequestString() {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			Util::QueryStringBuilder builder;
 
 			if (requestFormat.has_value()) {
@@ -177,9 +176,9 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <param name="data">The data received from the data stream.</param>
 		/// <returns>The format of the request.</returns>
-		Constants::RequestFormat determineRequestFormat(const std::vector<uint8_t>& data) {
+		Constants::RequestFormat determineRequestFormat(const std::vector<uint8_t>& data) const {
 			{
-				std::lock_guard<std::mutex> lock(configMutex);
+				std::lock_guard lock(configMutex);
 				if (requestFormat.has_value()) {
 					return requestFormat.value();
 				}
@@ -213,7 +212,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="format">The format of the request.</param>
 		/// <param name="data">The data received from the data stream.</param>
 		/// <returns>The timestamp of the data in milliseconds since epoch, or -1 if parsing fails.</returns>
-		int64_t determineTimestamp(Constants::RequestFormat format, const std::vector<uint8_t>& data) {
+		int64_t determineTimestamp(Constants::RequestFormat format, const std::vector<uint8_t>& data) const {
 			try {
 				if (format == Constants::RequestFormat::JSON ||
 					format == Constants::RequestFormat::OM_JSON ||
@@ -273,7 +272,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <param name="timestamp">ISO 8601 formatted timestamp string.</param>
 		/// <returns>Milliseconds since Unix epoch, or -1 if parsing fails.</returns>
-		int64_t parseISO8601(const std::string& timestamp) {
+		int64_t parseISO8601(const std::string& timestamp) const {
 			std::tm tm = {};
 			int millis = 0;
 
@@ -309,39 +308,6 @@ namespace OSHConnect::Websocket {
 		}
 
 		/// <summary>
-		/// Starts or restarts the io_context thread if needed.
-		/// Must be called with wsMutex held.
-		/// </summary>
-		void ensureIoContextRunning() {
-			if (!ioThread || !ioThread->joinable()) {
-				ioc.restart();
-				ioThread = std::make_unique<std::thread>([this]() {
-					try {
-						ioc.run();
-					}
-					catch (const std::exception& e) {
-						log("Error in io_context thread: " + std::string(e.what()), LogLevel::ERR);
-					}
-					catch (...) {
-						log("Unknown error in io_context thread", LogLevel::ERR);
-					}
-				});
-			}
-		}
-
-		/// <summary>
-		/// Stops the io_context thread if running.
-		/// Must be called with wsMutex held.
-		/// </summary>
-		void stopIoContext() {
-			if (ioThread && ioThread->joinable()) {
-				ioc.stop();
-				ioThread->join();
-				ioThread.reset();
-			}
-		}
-
-		/// <summary>
 		/// Internal connect implementation (not thread-safe, must be called with wsMutex held).
 		/// </summary>
 		void connectInternal() {
@@ -355,13 +321,13 @@ namespace OSHConnect::Websocket {
 			// Ensure clean state before connecting
 			disconnectInternal();
 
-			// Temporary variables for rollback on failure
-			bool wasConnected = false;
+			// Reset connection state
+			{
+				std::lock_guard lock(connectionMutex);
+				connectionAttemptComplete = false;
+			}
 
 			try {
-				// Ensure io_context is running
-				ensureIoContextRunning();
-
 				// Build the full WebSocket URL
 				std::string fullUrl = dataStream.getParentSystem()->getParentNode()->getWSPrefix() +
 					dataStream.getParentSystem()->getParentNode()->getApiEndpoint() +
@@ -372,103 +338,130 @@ namespace OSHConnect::Websocket {
 
 				log("Connecting to: " + fullUrl, LogLevel::INFO);
 
-				// Parse URL components required by Boost.Beast
-				std::string scheme;
-				std::string host;
-				std::string port;
-				std::string path;
+				// Configure the WebSocket
+				webSocket.setUrl(fullUrl);
 
-				size_t schemeEnd = fullUrl.find("://");
-				if (schemeEnd == std::string::npos) {
-					throw std::runtime_error("Invalid URL format: missing scheme");
-				}
+				// Enable automatic ping for connection health monitoring
+				webSocket.setPingInterval(30);  // Send ping every 30 seconds
 
-				scheme = fullUrl.substr(0, schemeEnd);
-				size_t hostStart = schemeEnd + 3;
-				size_t pathStart = fullUrl.find('/', hostStart);
-
-				if (hostStart >= fullUrl.length()) {
-					throw std::runtime_error("Invalid URL format: missing host");
-				}
-
-				std::string hostPort = fullUrl.substr(hostStart, pathStart - hostStart);
-				path = (pathStart != std::string::npos) ? fullUrl.substr(pathStart) : "/";
-
-				size_t portPos = hostPort.find(':');
-				if (portPos != std::string::npos) {
-					host = hostPort.substr(0, portPos);
-					port = hostPort.substr(portPos + 1);
-				}
-				else {
-					host = hostPort;
-					port = (scheme == "wss") ? "443" : "80";
-				}
-
-				// Set timeout for connection
+				// Set connection timeout
 				std::chrono::seconds timeout;
 				{
-					std::lock_guard<std::mutex> lock(configMutex);
+					std::lock_guard lock(configMutex);
 					timeout = connectionTimeout;
 				}
-				boost::beast::get_lowest_layer(ws).expires_after(timeout);
+				webSocket.setHandshakeTimeout(static_cast<int>(timeout.count() * 1000)); // milliseconds
 
-				// Perform connection steps with proper error handling
-				auto const results = resolver.resolve(host, port);
-				boost::beast::get_lowest_layer(ws).connect(results);
+				// Set up event handlers
+				webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+					// Early exit if shutting down to prevent use-after-free
+					if (isShutdown) {
+						return;
+					}
 
-				// Mark as connected before handshake to allow proper cleanup
-				wasConnected = true;
+					if (msg->type == ix::WebSocketMessageType::Message) {
+						// Handle binary or text message
+						const std::string& payload = msg->str;
+						std::vector<uint8_t> data(payload.begin(), payload.end());
 
-				// Set timeout for handshake
-				boost::beast::get_lowest_layer(ws).expires_after(timeout);
-				ws.handshake(host, path);
+						if (!data.empty()) {
+							try {
+								onStreamUpdate(data);
+							}
+							catch (const std::exception& e) {
+								log("Error in onStreamUpdate callback: " + std::string(e.what()), LogLevel::ERR);
+							}
+							catch (...) {
+								log("Unknown error in onStreamUpdate callback", LogLevel::ERR);
+							}
+						}
+					}
+					else if (msg->type == ix::WebSocketMessageType::Open) {
+						connected = true;
+						log("Successfully connected", LogLevel::INFO);
 
-				// Disable timeout after successful connection
-				boost::beast::get_lowest_layer(ws).expires_never();
+						// Notify connection waiters
+						{
+							std::lock_guard lock(connectionMutex);
+							connectionAttemptComplete = true;
+						}
+						connectionCV.notify_all();
 
-				// Success - update state
-				connected = true;
-				stopListening = false;
-				log("Successfully connected", LogLevel::INFO);
-				updateStatus(StreamStatus::CONNECTED);
+						updateStatus(StreamStatus::CONNECTED);
+					}
+					else if (msg->type == ix::WebSocketMessageType::Close) {
+						connected = false;
+						log("Connection closed: " + msg->closeInfo.reason, LogLevel::INFO);
+
+						// Notify connection waiters in case close happens during connection attempt
+						{
+							std::lock_guard lock(connectionMutex);
+							connectionAttemptComplete = true;
+						}
+						connectionCV.notify_all();
+
+						if (!isShutdown) {
+							updateStatus(StreamStatus::DISCONNECTED);
+							// Attempt reconnection if enabled (Issue #6 fix: managed thread)
+							if (autoReconnect && !reconnectionInProgress) {
+								startReconnectionThread();
+							}
+						}
+					}
+					else if (msg->type == ix::WebSocketMessageType::Error) {
+						log("WebSocket error: " + msg->errorInfo.reason, LogLevel::ERR);
+						connected = false;
+
+						// Notify connection waiters
+						{
+							std::lock_guard lock(connectionMutex);
+							connectionAttemptComplete = true;
+						}
+						connectionCV.notify_all();
+
+						if (!isShutdown) {
+							updateStatus(StreamStatus::DISCONNECTED);
+						}
+					}
+					else if (msg->type == ix::WebSocketMessageType::Ping) {
+						log("Received ping", LogLevel::DEBUG);
+					}
+					else if (msg->type == ix::WebSocketMessageType::Pong) {
+						log("Received pong", LogLevel::DEBUG);
+					}
+				});
+
+				// Start the connection
+				webSocket.start();
+
+				std::unique_lock lock(connectionMutex);
+				if (!connectionCV.wait_for(lock, timeout, [this]() {
+					return connectionAttemptComplete || isShutdown;
+				})) {
+					// Timeout occurred
+					webSocket.stop();
+					throw std::runtime_error("Connection timeout");
+				}
+
+				if (isShutdown) {
+					webSocket.stop();
+					throw std::runtime_error("Connection aborted due to shutdown");
+				}
+
+				// Check if actually connected (could have received error or close)
+				if (!connected) {
+					throw std::runtime_error("Connection failed");
+				}
 			}
 			catch (const std::exception& e) {
 				log("Connection failed: " + std::string(e.what()), LogLevel::ERR);
-
-				// Ensure consistent state on any failure
 				connected = false;
-				stopListening = true;
-
-				// Try to close the socket if we got far enough
-				if (wasConnected) {
-					try {
-						boost::beast::get_lowest_layer(ws).close();
-					}
-					catch (...) {
-						// Ignore errors during cleanup
-					}
-				}
-
 				updateStatus(StreamStatus::DISCONNECTED);
 				throw;
 			}
 			catch (...) {
 				log("Connection failed: unknown error", LogLevel::ERR);
-
-				// Ensure consistent state on any failure
 				connected = false;
-				stopListening = true;
-
-				// Try to close the socket if we got far enough
-				if (wasConnected) {
-					try {
-						boost::beast::get_lowest_layer(ws).close();
-					}
-					catch (...) {
-						// Ignore errors during cleanup
-					}
-				}
-
 				updateStatus(StreamStatus::DISCONNECTED);
 				throw;
 			}
@@ -478,10 +471,17 @@ namespace OSHConnect::Websocket {
 		/// Internal disconnect implementation (not thread-safe, must be called with wsMutex held).
 		/// </summary>
 		void disconnectInternal() {
-			if (connected) {
+			if (connected || webSocket.getReadyState() != ix::ReadyState::Closed) {
 				try {
-					stopListening = true;
-					ws.close(boost::beast::websocket::close_code::normal);
+					// Stop the WebSocket - this is synchronous and waits for the internal
+					// thread to finish, but callbacks may still be queued
+					webSocket.stop();
+
+					// Brief wait to ensure all queued callbacks complete.
+					// IXWebSocket's stop() is synchronous, but OS-level socket operations
+					// and callback dispatch may still be in flight on some platforms.
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
 					log("Disconnected", LogLevel::INFO);
 				}
 				catch (const std::exception& e) {
@@ -498,6 +498,47 @@ namespace OSHConnect::Websocket {
 		}
 
 		/// <summary>
+		/// Starts a managed reconnection thread.
+		/// </summary>
+		void startReconnectionThread() {
+			// Clean up any previous reconnection thread
+			{
+				std::lock_guard lock(reconnectMutex);
+				if (reconnectThread && reconnectThread->joinable()) {
+					// Previous thread is still running, don't start another
+					return;
+				}
+			}
+
+			reconnectionInProgress = true;
+
+			std::lock_guard lock(reconnectMutex);
+			reconnectThread = std::make_unique<std::thread>([this]() {
+				attemptReconnection();
+				reconnectionInProgress = false;
+			});
+		}
+
+		/// <summary>
+		/// Stops and joins the reconnection thread if active.
+		/// </summary>
+		void stopReconnectionThread() {
+			std::unique_ptr<std::thread> threadToJoin;
+
+			{
+				std::lock_guard lock(reconnectMutex);
+				if (reconnectThread) {
+					threadToJoin = std::move(reconnectThread);
+				}
+			}
+
+			// Join outside the lock to avoid deadlock
+			if (threadToJoin && threadToJoin->joinable()) {
+				threadToJoin->join();
+			}
+		}
+
+		/// <summary>
 		/// Attempts to reconnect with exponential backoff.
 		/// </summary>
 		void attemptReconnection() {
@@ -507,7 +548,13 @@ namespace OSHConnect::Websocket {
 
 			log("Attempting automatic reconnection", LogLevel::INFO);
 
-			for (int attempt = 0; attempt < maxReconnectAttempts; ++attempt) {
+			int maxAttempts;
+			{
+				std::lock_guard lock(configMutex);
+				maxAttempts = maxReconnectAttempts;
+			}
+
+			for (int attempt = 0; attempt < maxAttempts; ++attempt) {
 				if (isShutdown || !autoReconnect) {
 					break;
 				}
@@ -515,7 +562,7 @@ namespace OSHConnect::Websocket {
 				// Exponential backoff: 1s, 2s, 4s, etc.
 				auto delay = std::chrono::seconds(1 << attempt);
 				log("Reconnection attempt " + std::to_string(attempt + 1) + " of " +
-					std::to_string(maxReconnectAttempts) + " in " +
+					std::to_string(maxAttempts) + " in " +
 					std::to_string(delay.count()) + " seconds", LogLevel::INFO);
 
 				std::this_thread::sleep_for(delay);
@@ -525,7 +572,7 @@ namespace OSHConnect::Websocket {
 				}
 
 				try {
-					std::lock_guard<std::mutex> lock(wsMutex);
+					std::lock_guard lock(wsMutex);
 					if (!isShutdown && autoReconnect) {
 						connectInternal();
 						log("Reconnection successful", LogLevel::INFO);
@@ -540,7 +587,7 @@ namespace OSHConnect::Websocket {
 				}
 			}
 
-			log("Automatic reconnection failed after " + std::to_string(maxReconnectAttempts) + " attempts", LogLevel::ERR);
+			log("Automatic reconnection failed after " + std::to_string(maxAttempts) + " attempts", LogLevel::ERR);
 		}
 
 		/// <summary>
@@ -550,8 +597,8 @@ namespace OSHConnect::Websocket {
 		void reconnectIfConnected() {
 			if (isShutdown) return;
 
-			std::lock_guard<std::mutex> lock(wsMutex);
-			if (connected && !isShutdown) {
+			std::lock_guard lock(wsMutex);
+			if (connected && !isShutdown && !reconnectionInProgress) {
 				log("Reconnecting due to configuration change", LogLevel::INFO);
 				connectInternal();
 			}
@@ -565,7 +612,7 @@ namespace OSHConnect::Websocket {
 			std::vector<StatusListener> listenersCopy;
 
 			{
-				std::lock_guard<std::mutex> lock(listenerMutex);
+				std::lock_guard lock(listenerMutex);
 				listenersCopy.reserve(statusListeners.size());
 				for (const auto& [id, listener] : statusListeners) {
 					listenersCopy.push_back(listener);
@@ -586,77 +633,6 @@ namespace OSHConnect::Websocket {
 			}
 		}
 
-		/// <summary>
-		/// Internal listening loop for the async thread.
-		/// </summary>
-		void listenLoop() {
-			boost::beast::flat_buffer buffer;
-
-			while (connected && !stopListening && !isShutdown) {
-				try {
-					std::vector<uint8_t> data;
-
-					// Perform the read with proper locking
-					{
-						std::lock_guard<std::mutex> lock(wsMutex);
-						if (!connected || stopListening || isShutdown) break;
-
-						ws.read(buffer);
-
-						data.resize(buffer.size());
-						boost::asio::buffer_copy(boost::asio::buffer(data), buffer.data());
-
-						buffer.consume(buffer.size());
-					}
-
-					// Process data outside the lock
-					if (!data.empty()) {
-						try {
-							onStreamUpdate(data);
-						}
-						catch (const std::exception& e) {
-							log("Error in onStreamUpdate callback: " + std::string(e.what()), LogLevel::ERR);
-						}
-						catch (...) {
-							log("Unknown error in onStreamUpdate callback", LogLevel::ERR);
-						}
-					}
-				}
-				catch (const boost::beast::system_error& e) {
-					if (e.code() == boost::beast::websocket::error::closed ||
-						e.code() == boost::asio::error::operation_aborted) {
-						log("Connection closed", LogLevel::INFO);
-						break;
-					}
-
-					// Log other errors
-					log("WebSocket error in listen loop: " + std::string(e.what()), LogLevel::ERR);
-
-					// If connection error, break the loop and attempt reconnection
-					if (e.code() == boost::asio::error::connection_reset ||
-						e.code() == boost::asio::error::eof) {
-							{
-								std::lock_guard<std::mutex> lock(wsMutex);
-								connected = false;
-								updateStatus(StreamStatus::DISCONNECTED);
-							}
-
-							// Attempt reconnection if enabled
-							attemptReconnection();
-							break;
-					}
-				}
-				catch (const std::exception& e) {
-					log("Unexpected error in listen loop: " + std::string(e.what()), LogLevel::ERR);
-					break;
-				}
-				catch (...) {
-					log("Unknown error in listen loop", LogLevel::ERR);
-					break;
-				}
-			}
-		}
-
 	public:
 		/// <summary>
 		/// Creates a new data stream listener for the specified data stream.
@@ -668,6 +644,7 @@ namespace OSHConnect::Websocket {
 
 		virtual ~StreamListener() {
 			shutdown();
+			stopReconnectionThread();
 		}
 
 		StreamListener(const StreamListener&) = delete;
@@ -698,82 +675,13 @@ namespace OSHConnect::Websocket {
 
 		/// <summary>
 		/// Connects to the data stream using the specified request format, replay speed, and time period.
+		/// This method blocks until the connection is established or times out.
+		/// Once connected, ixwebsocket handles all message processing automatically via callbacks.
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void connect() {
-			std::lock_guard<std::mutex> lock(wsMutex);
+			std::lock_guard lock(wsMutex);
 			connectInternal();
-		}
-
-		/// <summary>
-		/// Starts listening for incoming data in a background thread.
-		/// This method returns immediately after spawning the listener thread.
-		/// Call stopListeningAsync() to stop the background thread.
-		/// Thread-safe: can be called from multiple threads.
-		/// </summary>
-		void startListening() {
-			std::lock_guard<std::mutex> lock(threadMutex);
-
-			if (listenerThread && listenerThread->joinable()) {
-				throw std::runtime_error("Already listening");
-			}
-
-			if (!connected) {
-				throw std::runtime_error("Not connected");
-			}
-
-			stopListening = false;
-			listenerThread = std::make_unique<std::thread>([this]() {
-				listenLoop();
-			});
-		}
-
-		/// <summary>
-		/// Stops the background listening thread and waits for it to complete.
-		/// Thread-safe: can be called from multiple threads.
-		/// </summary>
-		void stopListeningAsync() {
-			std::unique_ptr<std::thread> threadToJoin;
-
-			{
-				std::lock_guard<std::mutex> lock(threadMutex);
-				stopListening = true;
-
-				// Cancel any blocking read operation
-				{
-					std::lock_guard<std::mutex> wsLock(wsMutex);
-					if (connected) {
-						try {
-							boost::beast::get_lowest_layer(ws).cancel();
-						}
-						catch (...) {
-							// Ignore errors during cancellation
-						}
-					}
-				}
-
-				// Move thread out to join outside lock
-				threadToJoin = std::move(listenerThread);
-			}
-
-			// Join outside the lock to avoid deadlock
-			if (threadToJoin && threadToJoin->joinable()) {
-				threadToJoin->join();
-			}
-		}
-
-		/// <summary>
-		/// Listens for incoming data from the WebSocket connection.
-		/// This method blocks until the connection is closed or an error occurs.
-		/// Thread-safe: can be called from a dedicated listener thread.
-		/// For non-blocking listening, use startListening() instead.
-		/// </summary>
-		void listen() {
-			if (!connected) {
-				throw std::runtime_error("Not connected");
-			}
-
-			listenLoop();
 		}
 
 		/// <summary>
@@ -781,12 +689,12 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void disconnect() {
-			// Stop any async listening first
-			stopListeningAsync();
+			// Stop any reconnection attempts
+			autoReconnect = false;
+			stopReconnectionThread();
 
-			std::lock_guard<std::mutex> lock(wsMutex);
+			std::lock_guard lock(wsMutex);
 			disconnectInternal();
-			stopIoContext();
 		}
 
 		/// <summary>
@@ -797,6 +705,7 @@ namespace OSHConnect::Websocket {
 		void shutdown() {
 			isShutdown = true;
 			autoReconnect = false;
+			stopReconnectionThread();
 			disconnect();
 			updateStatus(StreamStatus::SHUTDOWN);
 		}
@@ -806,12 +715,12 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		/// <returns>True if connected and socket is open, false otherwise.</returns>
-		bool isConnected() {
+		bool isConnected() const {
 			if (isShutdown) {
 				return false;
 			}
-			std::lock_guard<std::mutex> lock(wsMutex);
-			return connected && ws.is_open();
+			std::lock_guard lock(wsMutex);
+			return connected && webSocket.getReadyState() == ix::ReadyState::Open;
 		}
 
 		/// <summary>
@@ -838,7 +747,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="listener">The listener callback function.</param>
 		/// <returns>A unique ID for this listener, used for removal.</returns>
 		ListenerId addStatusListener(StatusListener const& listener) {
-			std::lock_guard<std::mutex> lock(listenerMutex);
+			std::lock_guard lock(listenerMutex);
 			statusListeners[nextListenerId] = listener;
 			return nextListenerId++;
 		}
@@ -849,7 +758,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <param name="id">The ID returned by addStatusListener.</param>
 		void removeStatusListener(ListenerId id) {
-			std::lock_guard<std::mutex> lock(listenerMutex);
+			std::lock_guard lock(listenerMutex);
 			statusListeners.erase(id);
 		}
 
@@ -859,7 +768,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <param name="callback">The logger callback function.</param>
 		void setLogger(LogCallback callback) {
-			std::lock_guard<std::mutex> lock(loggerMutex);
+			std::lock_guard lock(loggerMutex);
 			logger = callback;
 		}
 
@@ -868,7 +777,7 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void clearLogger() {
-			std::lock_guard<std::mutex> lock(loggerMutex);
+			std::lock_guard lock(loggerMutex);
 			logger.reset();
 		}
 
@@ -899,6 +808,7 @@ namespace OSHConnect::Websocket {
 			if (attempts <= 0) {
 				throw std::invalid_argument("Max reconnect attempts must be greater than 0");
 			}
+			std::lock_guard lock(configMutex);
 			maxReconnectAttempts = attempts;
 		}
 
@@ -908,6 +818,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <returns>The maximum number of reconnection attempts.</returns>
 		int getMaxReconnectAttempts() const {
+			std::lock_guard lock(configMutex);
 			return maxReconnectAttempts;
 		}
 
@@ -917,7 +828,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <param name="timeout">Timeout duration in seconds.</param>
 		void setConnectionTimeout(std::chrono::seconds timeout) {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			connectionTimeout = timeout;
 		}
 
@@ -927,7 +838,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		/// <returns>The connection timeout duration in seconds.</returns>
 		std::chrono::seconds getConnectionTimeout() const {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			return connectionTimeout;
 		}
 
@@ -937,7 +848,7 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		std::optional<Constants::RequestFormat> getRequestFormat() const {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			return requestFormat;
 		}
 
@@ -950,7 +861,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="format">The format of the request.</param>
 		void setRequestFormat(Constants::RequestFormat format) {
 			{
-				std::lock_guard<std::mutex> lock(configMutex);
+				std::lock_guard lock(configMutex);
 				requestFormat = format;
 			}
 			reconnectIfConnected();
@@ -962,7 +873,7 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		std::optional<ConnectedSystemsAPI::DataModels::TimeExtent> getTimeExtent() const {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			return timeExtent;
 		}
 
@@ -975,7 +886,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="extent">The time period of the request. Use nullopt to remove the previously set time period.</param>
 		void setTimeExtent(const ConnectedSystemsAPI::DataModels::TimeExtent & extent) {
 			{
-				std::lock_guard<std::mutex> lock(configMutex);
+				std::lock_guard lock(configMutex);
 				timeExtent = extent;
 			}
 			reconnectIfConnected();
@@ -989,7 +900,7 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		double getReplaySpeed() const {
-			std::lock_guard<std::mutex> lock(configMutex);
+			std::lock_guard lock(configMutex);
 			return replaySpeed;
 		}
 
@@ -1004,7 +915,7 @@ namespace OSHConnect::Websocket {
 		/// <param name="speed">The replay speed of the request.</param>
 		void setReplaySpeed(double speed) {
 			{
-				std::lock_guard<std::mutex> lock(configMutex);
+				std::lock_guard lock(configMutex);
 				replaySpeed = speed;
 			}
 			reconnectIfConnected();
@@ -1012,8 +923,12 @@ namespace OSHConnect::Websocket {
 
 		/// <summary>
 		/// The data stream being listened to.
-		/// Note: The returned reference is only valid while this StreamListener exists.
 		/// </summary>
 		OSHDataStream& getDataStream() { return dataStream; }
+
+		/// <summary>
+		/// The data stream being listened to.
+		/// </summary>
+		const OSHDataStream& getDataStream() const { return dataStream; }
 	};
 }

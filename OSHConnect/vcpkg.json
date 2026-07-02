@@ -1,10 +1,10 @@
 {
   "name": "oshconnect",
   "version-string": "1.0.0",
+  "builtin-baseline": "cb2981c4e03d421fa03b9bb5044cd1986180e7e4",
   "dependencies": [
-    "boost-beast",
-    "boost-asio",
     "nlohmann-json",
-    "curl"
+    "cpp-httplib",
+    "ixwebsocket"
   ]
 }

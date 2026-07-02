@@ -4,6 +4,8 @@
 #include <exception>
 #include <iostream>
 #include <string>
+#include <chrono>
+#include <thread>
 
 #include "../OSHConnect/OSHConnect.h"
 #include "../OSHConnect/OSHNode.h"
@@ -51,7 +53,7 @@ namespace OSHConnectTest
 
 			// Create handler using StreamManager
 			auto* handler = streamManager.createDataStreamHandler(
-				[&messageCount, &maxMessages, &activeListener](const OSHConnect::Websocket::StreamEventArgs& args) {
+				[&messageCount, &maxMessages](const OSHConnect::Websocket::StreamEventArgs& args) {
 				// Display received data with metadata
 				std::cout << "Received observation #" << (messageCount + 1) << std::endl;
 				std::cout << "  Stream ID: " << args.getDataStream()->getId() << std::endl;
@@ -63,10 +65,6 @@ namespace OSHConnectTest
 				}
 
 				messageCount++;
-
-				if (messageCount >= maxMessages && activeListener) {
-					activeListener->disconnect();
-				}
 			});
 
 			try {
@@ -77,9 +75,21 @@ namespace OSHConnectTest
 				handler->connect();
 				std::cout << "Connected to OSH WebSocket for data stream " + dataStreamId << std::endl;
 
-				// Listen will block until we receive maxMessages and disconnect
-				// Note: In a real application with multiple streams, each listener would run in its own thread
-				activeListener->listen();
+				// Wait for messages to be received via callbacks
+				// Note: ixwebsocket is event-driven - callbacks handle messages automatically
+				// We just need to wait until we've received enough messages
+				std::cout << "Waiting for " << maxMessages << " messages..." << std::endl;
+
+				// Wait with timeout (30 seconds max)
+				auto startTime = std::chrono::steady_clock::now();
+				while (messageCount < maxMessages) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+					auto elapsed = std::chrono::steady_clock::now() - startTime;
+					if (elapsed > std::chrono::seconds(30)) {
+						throw std::runtime_error("Timeout waiting for messages");
+					}
+				}
 
 				Assert::AreEqual(5, messageCount, L"Should receive 5 messages");
 				std::cout << "Successfully received " + std::to_string(messageCount) + " messages" << std::endl;
