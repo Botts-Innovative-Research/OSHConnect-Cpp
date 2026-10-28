@@ -29,11 +29,12 @@ namespace OSHConnect::Websocket {
 		}
 
 		/// <summary>
-		/// Returns the data as an Observation object or nullopt if the data is not in JSON format.
+		/// Returns the data as an Observation object, or nullopt if the data is not in JSON or O&amp;M JSON format.
+		/// Both formats use the same observation encoding.
 		/// </summary>
 		/// <returns>An Observation object, or nullopt if parsing fails.</returns>
 		std::optional<ConnectedSystemsAPI::DataModels::Observation> getObservation() const {
-			if (format != Constants::RequestFormat::JSON) return std::nullopt;
+			if (format != Constants::RequestFormat::JSON && format != Constants::RequestFormat::OM_JSON) return std::nullopt;
 
 			try {
 				std::string jsonStr(data.begin(), data.end());

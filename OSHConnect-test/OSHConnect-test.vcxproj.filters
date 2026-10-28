@@ -30,6 +30,15 @@
     <ClCompile Include="NodeManagerTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="QueryStringBuilderTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
+    <ClCompile Include="StreamEventArgsTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
+    <ClCompile Include="WebsocketAuthTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
     <ClCompile Include="SystemIntegrationTests.cpp">
       <Filter>Source Files\IntegrationTests</Filter>
     </ClCompile>
@@ -43,6 +52,9 @@
       <Filter>Source Files\IntegrationTests</Filter>
     </ClCompile>
     <ClCompile Include="ControlStreamIntegrationTest.cpp">
+      <Filter>Source Files\IntegrationTests</Filter>
+    </ClCompile>
+    <ClCompile Include="Test.cpp">
       <Filter>Source Files\IntegrationTests</Filter>
     </ClCompile>
   </ItemGroup>

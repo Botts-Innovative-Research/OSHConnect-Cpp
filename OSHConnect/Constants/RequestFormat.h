@@ -18,14 +18,18 @@ namespace OSHConnect::Constants {
 		PLAIN_TEXT
 	};
 
+	/// <summary>
+	/// The MIME type of the format, e.g., "application/om+json".
+	/// This is not URL-encoded; QueryStringBuilder encodes it when used in a query string.
+	/// </summary>
 	inline std::string getMimeType(RequestFormat rf) {
 		switch (rf) {
 		case RequestFormat::JSON:        return "application/json";
-		case RequestFormat::OM_JSON:     return "application/om%2Bjson";
-		case RequestFormat::SWE_CSV:     return "application/swe%2Bcsv";
-		case RequestFormat::SWE_JSON:    return "application/swe%2Bjson";
-		case RequestFormat::SWE_XML:     return "application/swe%2Bxml";
-		case RequestFormat::SWE_BINARY:  return "application/swe%2Bbinary";
+		case RequestFormat::OM_JSON:     return "application/om+json";
+		case RequestFormat::SWE_CSV:     return "application/swe+csv";
+		case RequestFormat::SWE_JSON:    return "application/swe+json";
+		case RequestFormat::SWE_XML:     return "application/swe+xml";
+		case RequestFormat::SWE_BINARY:  return "application/swe+binary";
 		case RequestFormat::PLAIN_TEXT:  return "text/plain";
 		}
 		throw std::invalid_argument("Unknown RequestFormat value");

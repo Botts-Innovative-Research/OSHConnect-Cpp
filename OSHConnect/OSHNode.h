@@ -65,7 +65,7 @@ namespace OSHConnect {
 			authenticationToken(authToken),
 			isSecure(root.find("https://") == 0),
 			isBasicAuth(isBasicAuth),
-			conSysAPI(ConnectedSystemsAPI::ConSysAPI(getApiEndpoint(), authToken, isBasicAuth)),
+			conSysAPI(ConnectedSystemsAPI::ConSysAPI(getHTTPPrefix() + getApiEndpoint(), authToken, isBasicAuth)),
 			name(name.empty() ? "OSH Node" : name),
 			uniqueId(uniqueId.empty() ? generateIdFromRoot(sensorHubRoot) : uniqueId) {
 		}

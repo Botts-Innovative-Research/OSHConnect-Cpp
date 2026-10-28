@@ -19,6 +19,34 @@ namespace OSHConnectTest
 			Assert::AreEqual(std::string("node-001"), addedNode.getUniqueId());
 		}
 
+		TEST_METHOD(AddNode_ByCredentials_EncodesUsernameAndPassword) {
+			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
+			auto& nodeManager = oshConnect.getNodeManager();
+			OSHConnect::OSHNode addedNode = nodeManager.addNode("localhost:8282/sensorhub", "admin", "password");
+			Assert::IsTrue(addedNode.getIsBasicAuth());
+			Assert::AreEqual(std::string("YWRtaW46cGFzc3dvcmQ="), addedNode.getAuthenticationToken());
+			Assert::AreEqual(std::string("Basic YWRtaW46cGFzc3dvcmQ="), addedNode.getConSysAPI().getAuthHeader());
+		}
+
+		TEST_METHOD(AddNode_Http_ApiRootKeepsScheme) {
+			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
+			auto node = oshConnect.getNodeManager().addNode("http://example.com:8282/sensorhub", "admin", "admin");
+			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node.getConSysAPI().getApiRoot());
+		}
+
+		TEST_METHOD(AddNode_Https_ApiRootKeepsScheme) {
+			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
+			auto node = oshConnect.getNodeManager().addNode("https://example.com/sensorhub", "admin", "admin");
+			Assert::IsTrue(node.getIsSecure());
+			Assert::AreEqual(std::string("https://example.com/sensorhub/api"), node.getConSysAPI().getApiRoot());
+		}
+
+		TEST_METHOD(AddNode_NoScheme_ApiRootUsesHttp) {
+			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
+			auto node = oshConnect.getNodeManager().addNode("example.com:8282/sensorhub", "admin", "admin");
+			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node.getConSysAPI().getApiRoot());
+		}
+
 		TEST_METHOD(AddNode_ByNode) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();

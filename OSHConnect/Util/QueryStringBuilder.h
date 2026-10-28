@@ -37,6 +37,28 @@ namespace OSHConnect::Util {
 		/// </summary>
 		std::map<std::string, std::string, std::less<>> parameters;
 
+		/// <summary>
+		/// Percent-encodes a query string key or value.
+		/// Unreserved characters are kept, as are ':' and '/' (used in times) and ',' (the list separator).
+		/// </summary>
+		static std::string encode(std::string_view text) {
+			static constexpr char HEX[] = "0123456789ABCDEF";
+			std::string encoded;
+			encoded.reserve(text.size());
+			for (unsigned char c : text) {
+				if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+					|| c == '-' || c == '.' || c == '_' || c == '~' || c == ':' || c == '/' || c == ',') {
+					encoded += static_cast<char>(c);
+				}
+				else {
+					encoded += '%';
+					encoded += HEX[c >> 4];
+					encoded += HEX[c & 0x0F];
+				}
+			}
+			return encoded;
+		}
+
 	public:
 		QueryStringBuilder() = default;
 		~QueryStringBuilder() = default;
@@ -189,7 +211,7 @@ namespace OSHConnect::Util {
 			bool first = true;
 			for (const auto& [key, value] : parameters) {
 				if (!first) queryString << '&';
-				queryString << key << '=' << value;
+				queryString << encode(key) << '=' << encode(value);
 				first = false;
 			}
 			return queryString.str();

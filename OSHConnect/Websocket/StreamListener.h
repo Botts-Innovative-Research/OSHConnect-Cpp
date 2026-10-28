@@ -328,9 +328,11 @@ namespace OSHConnect::Websocket {
 			}
 
 			try {
+				auto* node = dataStream.getParentSystem()->getParentNode();
+
 				// Build the full WebSocket URL
-				std::string fullUrl = dataStream.getParentSystem()->getParentNode()->getWSPrefix() +
-					dataStream.getParentSystem()->getParentNode()->getApiEndpoint() +
+				std::string fullUrl = node->getWSPrefix() +
+					node->getApiEndpoint() +
 					"/" + Constants::getEndpoint(Constants::Service::DATASTREAMS) + "/" +
 					dataStream.getId() + "/" +
 					Constants::getEndpoint(Constants::Service::OBSERVATIONS) +
@@ -341,6 +343,13 @@ namespace OSHConnect::Websocket {
 				// Configure the WebSocket
 				webSocket.setUrl(fullUrl);
 
+				// Authenticate the handshake with the same credentials as the node's REST requests
+				ix::WebSocketHttpHeaders headers;
+				if (!node->getAuthenticationToken().empty()) {
+					headers["Authorization"] = node->getConSysAPI().getAuthHeader();
+				}
+				webSocket.setExtraHeaders(headers);
+
 				// Enable automatic ping for connection health monitoring
 				webSocket.setPingInterval(30);  // Send ping every 30 seconds
 
@@ -350,7 +359,7 @@ namespace OSHConnect::Websocket {
 					std::lock_guard lock(configMutex);
 					timeout = connectionTimeout;
 				}
-				webSocket.setHandshakeTimeout(static_cast<int>(timeout.count() * 1000)); // milliseconds
+				webSocket.setHandshakeTimeout(static_cast<int>(timeout.count())); // seconds
 
 				// Set up event handlers
 				webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {

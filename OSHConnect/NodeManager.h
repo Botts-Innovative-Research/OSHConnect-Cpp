@@ -61,6 +61,12 @@ namespace OSHConnect {
 			return addNode(newNode);
 		}
 
+		// Overload for a string literal password. Without it, a const char* password converts to bool
+		// and selects the (root, authToken, isBasicAuth) overload instead.
+		OSHNode addNode(const std::string& root, const std::string& username, const char* password, const std::string& name = "", const std::string& uniqueId = "") {
+			return addNode(root, username, std::string(password), name, uniqueId);
+		}
+
 		/// <summary>
 		/// Remove a node from OSHConnect by ID.
 		/// </summary>
