@@ -25,8 +25,7 @@ namespace OSHConnect {
 		/// Query the node for the latest commands of this control stream with the specified parameters.
 		/// </summary>
 		std::vector<ConnectedSystemsAPI::DataModels::Command> fetchCommands(std::string query = "") {
-			auto response = getConSysAPI().getCommandsAPI().fetchCommandsOfControlStream(getId(), query);
-			std::cout << "fetchCommands: " << response.getResponseBody() << std::endl;
+			auto response = getConSysAPI().getCommandsAPI().getCommandsOfControlStream(getId(), query);
 			if (response.isSuccessful() && !response.getItems().empty()) {
 				return response.getItems();
 			}
@@ -46,7 +45,7 @@ namespace OSHConnect {
 		/// <param name="commandId">The ID of the command to fetch.</param>
 		/// <returns>The command with the specified ID, or an empty command if not found.</returns>
 		ConnectedSystemsAPI::DataModels::Command fetchCommandById(const std::string& commandId) {
-			auto response = getConSysAPI().getCommandsAPI().fetchCommandById(commandId);
+			auto response = getConSysAPI().getCommandsAPI().getCommandById(commandId);
 			if (response.isSuccessful()) {
 				return response.getItem();
 			}

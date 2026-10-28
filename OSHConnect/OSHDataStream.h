@@ -26,7 +26,7 @@ namespace OSHConnect {
 		/// Query the node for the latest observations of this data stream with the specified parameters.
 		/// </summary>
 		std::vector<ConnectedSystemsAPI::DataModels::Observation> fetchObservations(std::string query = "") {
-			auto response = getConSysAPI().getObservationsAPI().fetchObservationsOfDataStream(getId(), query);
+			auto response = getConSysAPI().getObservationsAPI().getObservationsOfDataStream(getId(), query);
 			if (response.isSuccessful() && !response.getItems().empty()) {
 				return response.getItems();
 			}
@@ -46,7 +46,7 @@ namespace OSHConnect {
 		/// <param name="observationId">The ID of the observation to fetch.</param>
 		/// <returns>The observation with the specified ID, or an empty observation if not found.</returns>
 		ConnectedSystemsAPI::DataModels::Observation fetchObservationById(const std::string& observationId) {
-			auto response = getConSysAPI().getObservationsAPI().fetchObservationById(observationId);
+			auto response = getConSysAPI().getObservationsAPI().getObservationById(observationId);
 			if (response.isSuccessful()) {
 				return response.getItem();
 			}

@@ -35,14 +35,18 @@ namespace OSHConnectTest
 				systemId = system.getId();
 			}
 
+			Assert::IsFalse(systemId.empty(), L"The node has no systems");
 			auto system = node.getSystemById(systemId);
+			Assert::IsTrue(system.has_value(), L"Could not get the system");
 			auto dataStreams = system->discoverDataStreams();
 			std::string dataStreamId;
 			for (const auto& ds : dataStreams) {
 				std::cout << "Discovered data stream: " + ds.getDataStreamResource().getName().value_or("") << std::endl;
 				dataStreamId = ds.getId();
 			}
+			Assert::IsFalse(dataStreamId.empty(), L"The system has no data streams");
 			auto dataStream = system->getDataStreamById(dataStreamId);
+			Assert::IsTrue(dataStream.has_value(), L"Could not get the data stream");
 
 			auto& streamManager = oshConnect.getStreamManager();
 

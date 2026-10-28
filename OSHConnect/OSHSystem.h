@@ -292,7 +292,7 @@ namespace OSHConnect {
 		/// Query the node for the latest commands with the specified parameters.
 		/// </summary>
 		std::vector<ConnectedSystemsAPI::DataModels::Command> fetchCommands(std::string query = "") {
-			auto response = getConSysAPI().getCommandsAPI().fetchCommands(query);
+			auto response = getConSysAPI().getCommandsAPI().getCommands(query);
 			if (response.isSuccessful() && !response.getItems().empty()) {
 				return response.getItems();
 			}
