@@ -47,3 +47,8 @@
 external/ConnectedSystemsAPI-CPP/CSAPI/x64/Debug
 
 */vcpkg_installed/*
+
+# MSBuild intermediate files
+*.tlog
+*.idb
+/OSHConnect-test/Test.cpp
