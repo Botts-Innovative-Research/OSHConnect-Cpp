@@ -52,3 +52,7 @@ external/ConnectedSystemsAPI-CPP/CSAPI/x64/Debug
 *.tlog
 *.idb
 /OSHConnect-test/Test.cpp
+
+
+# Visual Studio per-user project settings
+*.vcxproj.user
