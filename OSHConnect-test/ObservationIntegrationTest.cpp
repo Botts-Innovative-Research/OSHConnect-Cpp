@@ -1,8 +1,9 @@
+#include "pch.h"
+#include "CppUnitTest.h"
+
 #include <chrono>
 #include <string>
 
-#include "pch.h"
-#include "CppUnitTest.h"
 #include "TestHelper.h"
 #include "../OSHConnect/OSHNode.h"
 #include "../OSHConnect/OSHSystem.h"

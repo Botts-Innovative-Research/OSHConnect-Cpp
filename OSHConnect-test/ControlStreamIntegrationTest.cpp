@@ -1,7 +1,8 @@
-#include <string>
-
 #include "pch.h"
 #include "CppUnitTest.h"
+
+#include <string>
+
 #include "TestHelper.h"
 #include "../OSHConnect/OSHNode.h"
 #include "../OSHConnect/OSHSystem.h"
