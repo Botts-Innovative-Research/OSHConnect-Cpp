@@ -186,6 +186,7 @@
     <ClCompile Include="SystemIntegrationTests.cpp" />
     <ClCompile Include="Test.cpp" />
     <ClCompile Include="StreamEventArgsTest.cpp" />
+    <ClCompile Include="StreamListenerTimestampTest.cpp" />
     <ClCompile Include="WebsocketAuthTest.cpp" />
     <ClCompile Include="WebsocketIntegrationTest.cpp" />
   </ItemGroup>

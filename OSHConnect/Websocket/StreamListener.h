@@ -5,7 +5,6 @@
 #include <optional>
 #include <regex>
 #include <cstring>
-#include <cstdio>
 #include <vector>
 #include <functional>
 #include <exception>
@@ -19,6 +18,7 @@
 
 #include <ixwebsocket/IXWebSocket.h>
 #include <CSAPI/DataModels/TimeExtent.h>
+#include <CSAPI/Util/TimeUtils.h>
 #include <nlohmann/json.hpp>
 
 #include "StreamStatus.h"
@@ -59,7 +59,7 @@ namespace OSHConnect::Websocket {
 	class StreamListener {
 	private:
 		static inline const std::regex dateRegexText{ R"(\d{4}-\d{2}-\d{2}T\d{2}:)" };
-		static inline const std::regex dateRegexXML{ R"(<[^>]+>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)</[^>]+>)" };
+		static inline const std::regex dateRegexXML{ R"(<[^>]+>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))</[^>]+>)" };
 
 		OSHDataStream dataStream;
 
@@ -268,43 +268,23 @@ namespace OSHConnect::Websocket {
 		}
 
 		/// <summary>
-		/// Parse ISO 8601 timestamp to milliseconds since epoch.
+		/// Parse an RFC 3339 / ISO 8601 timestamp to milliseconds since epoch.
+		/// Surrounding whitespace (e.g., the newline ending a CSV record) is ignored.
 		/// </summary>
 		/// <param name="timestamp">ISO 8601 formatted timestamp string.</param>
 		/// <returns>Milliseconds since Unix epoch, or -1 if parsing fails.</returns>
-		int64_t parseISO8601(const std::string& timestamp) const {
-			std::tm tm = {};
-			int millis = 0;
+		static int64_t parseISO8601(const std::string& timestamp) {
+			const auto first = timestamp.find_first_not_of(" \t\r\n");
+			if (first == std::string::npos) return -1;
+			const auto last = timestamp.find_last_not_of(" \t\r\n");
 
-			// Try to parse with milliseconds
-#ifdef _WIN32
-			// Use sscanf_s on Windows (secure version)
-			if (sscanf_s(timestamp.c_str(), "%d-%d-%dT%d:%d:%d.%dZ",
-				&tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-				&tm.tm_hour, &tm.tm_min, &tm.tm_sec, &millis) >= 6) {
-#else
-			// Use standard sscanf on other platforms
-			if (std::sscanf(timestamp.c_str(), "%d-%d-%dT%d:%d:%d.%dZ",
-				&tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-				&tm.tm_hour, &tm.tm_min, &tm.tm_sec, &millis) >= 6) {
-#endif
-
-				tm.tm_year -= 1900;
-				tm.tm_mon -= 1;
-
-				// Convert to time_t treating tm as UTC
-#ifdef _WIN32
-				auto time = _mkgmtime(&tm);  // Windows
-#else
-				auto time = timegm(&tm);     // POSIX
-#endif
-
-				if (time == -1) return -1;
-
-				return time * 1000 + millis;
+			try {
+				auto timePoint = ConnectedSystemsAPI::TimeUtils::parseTimeStringUTC(timestamp.substr(first, last - first + 1));
+				return std::chrono::duration_cast<std::chrono::milliseconds>(timePoint.time_since_epoch()).count();
 			}
-
-			return -1;
+			catch (const std::invalid_argument&) {
+				return -1;
+			}
 		}
 
 		/// <summary>

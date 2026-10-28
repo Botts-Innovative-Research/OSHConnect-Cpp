@@ -36,6 +36,9 @@
     <ClCompile Include="StreamEventArgsTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="StreamListenerTimestampTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
     <ClCompile Include="WebsocketAuthTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
