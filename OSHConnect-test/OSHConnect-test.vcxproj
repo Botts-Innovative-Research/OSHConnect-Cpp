@@ -177,6 +177,7 @@
   <ItemGroup>
     <ClCompile Include="ControlStreamIntegrationTest.cpp" />
     <ClCompile Include="DataStreamIntegrationTest.cpp" />
+    <ClCompile Include="NodeConnectionTest.cpp" />
     <ClCompile Include="NodeManagerTest.cpp" />
     <ClCompile Include="ObservationIntegrationTest.cpp" />
     <ClCompile Include="OSHConnectTest.cpp" />

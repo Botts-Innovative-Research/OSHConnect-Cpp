@@ -27,6 +27,9 @@
     <ClCompile Include="OSHConnectTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="NodeConnectionTest.cpp">
+      <Filter>Source Files\IntegrationTests</Filter>
+    </ClCompile>
     <ClCompile Include="NodeManagerTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>

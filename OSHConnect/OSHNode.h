@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <vector>
@@ -68,6 +69,26 @@ namespace OSHConnect {
 			conSysAPI(ConnectedSystemsAPI::ConSysAPI(getHTTPPrefix() + getApiEndpoint(), authToken, isBasicAuth)),
 			name(name.empty() ? "OSH Node" : name),
 			uniqueId(uniqueId.empty() ? generateIdFromRoot(sensorHubRoot) : uniqueId) {
+		}
+
+		/// <summary>
+		/// Check whether the node can be reached, serves the Connected Systems API, and accepts the credentials.
+		/// Unlike checking for systems, this tells a reachable node with no systems apart from one that can't be reached,
+		/// and says why the connection failed. Each call makes up to two requests to the node.
+		/// This blocks for up to twice the timeout, so call it off any UI or game thread.
+		/// </summary>
+		/// <param name="timeout">Time limit for each request.</param>
+		ConnectedSystemsAPI::ConnectionStatus checkConnection(
+			std::chrono::milliseconds timeout = ConnectedSystemsAPI::ConSysAPI::DEFAULT_CONNECTION_CHECK_TIMEOUT) const {
+			return conSysAPI.checkConnection(timeout);
+		}
+
+		/// <summary>
+		/// True if the node can be reached, serves the Connected Systems API, and accepts the credentials.
+		/// Same as checkConnection().isConnected(); use checkConnection() to find out why the connection failed.
+		/// </summary>
+		bool isConnected(std::chrono::milliseconds timeout = ConnectedSystemsAPI::ConSysAPI::DEFAULT_CONNECTION_CHECK_TIMEOUT) const {
+			return checkConnection(timeout).isConnected();
 		}
 
 		/// <summary>
