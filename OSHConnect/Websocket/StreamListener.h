@@ -251,10 +251,16 @@ namespace OSHConnect::Websocket {
 					}
 				}
 				else if (format == Constants::RequestFormat::SWE_BINARY) {
-					// Get the timestamp from the first 8 bytes of the binary data
+					// Get the timestamp from the first 8 bytes of the binary data.
+					// SWE binary encoding is big-endian (OSH's default byteOrder), so assemble the double
+					// most-significant byte first rather than memcpy'ing it in the host's byte order.
 					if (data.size() >= 8) {
+						uint64_t bits = 0;
+						for (size_t i = 0; i < 8; ++i) {
+							bits = (bits << 8) | data[i];
+						}
 						double timestampDouble;
-						std::memcpy(&timestampDouble, data.data(), sizeof(double));
+						std::memcpy(&timestampDouble, &bits, sizeof(double));
 						return static_cast<int64_t>(timestampDouble * 1000);
 					}
 				}
