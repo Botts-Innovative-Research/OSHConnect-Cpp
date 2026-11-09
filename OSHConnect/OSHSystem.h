@@ -43,12 +43,12 @@ namespace OSHConnect {
 				throw std::invalid_argument("Data stream resource must have an ID to be added or updated.");
 			}
 
+			// Add the observation schema, which has its own endpoint. If it can't be fetched, a new data stream has no
+			// schema and an existing one keeps the schema it has.
 			auto response = getConSysAPI().getDataStreamsAPI().getObservationSchema(dataStreamResource.getId().value());
-
-			// Create a new builder with the data stream resource and the fetched observation schema
-			ConnectedSystemsAPI::DataModels::DataStreamBuilder builder(dataStreamResource);
-			builder.withSchema(response.getItem());
-			auto dataStreamResourceNew = builder.build();
+			auto dataStreamResourceNew = response.isSuccessful()
+				? OSHDataStream::withSchema(dataStreamResource, response.getItem())
+				: dataStreamResource;
 
 			// Find or add the data stream in one step, so concurrent discovery can't add it twice
 			std::shared_ptr<OSHDataStream> existing;
@@ -77,12 +77,12 @@ namespace OSHConnect {
 				throw std::invalid_argument("Control stream resource must have an ID to be added or updated.");
 			}
 
+			// Add the command schema, which has its own endpoint. If it can't be fetched, a new control stream has no
+			// schema and an existing one keeps the schema it has.
 			auto response = getConSysAPI().getControlStreamsAPI().getControlStreamSchema(controlStreamResource.getId().value());
-
-			// Create a new builder with the control stream resource and the fetched command schema
-			ConnectedSystemsAPI::DataModels::ControlStreamBuilder builder(controlStreamResource);
-			builder.withSchema(response.getItem());
-			auto controlStreamResourceNew = builder.build();
+			auto controlStreamResourceNew = response.isSuccessful()
+				? OSHControlStream::withSchema(controlStreamResource, response.getItem())
+				: controlStreamResource;
 
 			// Find or add the control stream in one step, so concurrent discovery can't add it twice
 			std::shared_ptr<OSHControlStream> existing;

@@ -27,9 +27,27 @@ namespace OSHConnect {
 		mutable std::mutex mutex;
 		ConnectedSystemsAPI::DataModels::ControlStream controlStreamResource;
 
+		/// <summary>
+		/// Replaces the control stream resource. A resource without a schema keeps the schema this control stream already has:
+		/// the server sends the schema separately, so a missing one means it couldn't be fetched, not that it's gone.
+		/// </summary>
 		void setControlStreamResource(const ConnectedSystemsAPI::DataModels::ControlStream& resource) {
 			std::lock_guard lock(mutex);
-			controlStreamResource = resource;
+			if (resource.getSchema() || !controlStreamResource.getSchema()) {
+				controlStreamResource = resource;
+				return;
+			}
+			controlStreamResource = withSchema(resource, *controlStreamResource.getSchema());
+		}
+
+		/// <summary>
+		/// A copy of the resource with the given schema.
+		/// </summary>
+		static ConnectedSystemsAPI::DataModels::ControlStream withSchema(const ConnectedSystemsAPI::DataModels::ControlStream& resource,
+			const ConnectedSystemsAPI::DataModels::CommandSchema& schema) {
+			ConnectedSystemsAPI::DataModels::ControlStreamBuilder builder(resource);
+			builder.withSchema(schema);
+			return builder.build();
 		}
 
 		friend class OSHSystem;
@@ -89,19 +107,12 @@ namespace OSHConnect {
 				return false;
 			}
 
-			// The control stream resource doesn't include the schema, which has its own endpoint
-			ConnectedSystemsAPI::DataModels::ControlStreamBuilder builder(response.getItem());
+			// The control stream resource doesn't include the schema, which has its own endpoint.
+			// If it can't be fetched, setControlStreamResource keeps the schema the control stream already has.
 			auto schemaResponse = getConSysAPI().getControlStreamsAPI().getControlStreamSchema(id);
-			if (schemaResponse.isSuccessful()) {
-				builder.withSchema(schemaResponse.getItem());
-			}
-			else if (!builder.getSchema()) {
-				auto current = getControlStreamResource();
-				if (current.getSchema()) {
-					builder.withSchema(*current.getSchema());
-				}
-			}
-			setControlStreamResource(builder.build());
+			setControlStreamResource(schemaResponse.isSuccessful()
+				? withSchema(response.getItem(), schemaResponse.getItem())
+				: response.getItem());
 			return true;
 		}
 
@@ -160,6 +171,8 @@ namespace OSHConnect {
 
 		/// <summary>
 		/// The control stream resource representing this control stream.
+		/// Its command schema (getSchema()) is null if the schema has never been fetched successfully;
+		/// call refreshControlStream() to try again.
 		/// </summary>
 		ConnectedSystemsAPI::DataModels::ControlStream getControlStreamResource() const {
 			std::lock_guard lock(mutex);
