@@ -330,24 +330,6 @@ namespace OSHConnect {
 		}
 
 		/// <summary>
-		/// Query the node for the latest commands with the specified parameters.
-		/// </summary>
-		std::vector<ConnectedSystemsAPI::DataModels::Command> fetchCommands(std::string query = "") {
-			auto response = getConSysAPI().getCommandsAPI().getCommands(query);
-			if (response.isSuccessful() && !response.getItems().empty()) {
-				return response.getItems();
-			}
-			return {};
-		}
-
-		/// <summary>
-		/// Query the node for the latest commands with the specified parameters.
-		/// </summary>
-		std::vector<ConnectedSystemsAPI::DataModels::Command> fetchCommands(const ConnectedSystemsAPI::Query::CommandsOfControlStreamQuery& query) {
-			return fetchCommands(query.toString());
-		}
-
-		/// <summary>
 		/// The data streams discovered so far through this system, without querying the node.
 		/// </summary>
 		std::vector<std::shared_ptr<OSHDataStream>> getDataStreams() const {
