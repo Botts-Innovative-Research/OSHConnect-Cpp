@@ -4,6 +4,8 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <iterator>
+#include <mutex>
 
 #include "OSHNode.h"
 #include "CSAPI/Util/Utilities.h"
@@ -12,10 +14,11 @@ namespace OSHConnect {
 	/// <summary>
 	/// Manages the nodes of an OSHConnect instance.
 	/// Nodes are shared: the manager and every caller holding a node refer to the same object,
-	/// so systems discovered through any holder are visible to all of them.
+	/// so systems discovered through any holder are visible to all of them. All methods are thread-safe.
 	/// </summary>
 	class NodeManager {
 	private:
+		mutable std::mutex mutex;
 		std::vector<std::shared_ptr<OSHNode>> nodes;
 
 	public:
@@ -28,6 +31,7 @@ namespace OSHConnect {
 		std::shared_ptr<OSHNode> addNode(const std::shared_ptr<OSHNode>& node) {
 			if (!node) return nullptr;
 
+			std::lock_guard lock(mutex);
 			for (const auto& existingNode : nodes) {
 				if (existingNode->getUniqueId() == node->getUniqueId()) {
 					return existingNode;
@@ -79,10 +83,15 @@ namespace OSHConnect {
 		/// </summary>
 		/// <param name="uniqueId">The unique ID of the node to remove.</param>
 		void removeNode(const std::string& uniqueId) {
-			nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-				[&uniqueId](const std::shared_ptr<OSHNode>& node) {
-				return node->getUniqueId() == uniqueId;
-			}), nodes.end());
+			std::vector<std::shared_ptr<OSHNode>> removed;
+			{
+				std::lock_guard lock(mutex);
+				auto it = std::stable_partition(nodes.begin(), nodes.end(),
+					[&uniqueId](const std::shared_ptr<OSHNode>& node) { return node->getUniqueId() != uniqueId; });
+				removed.assign(std::make_move_iterator(it), std::make_move_iterator(nodes.end()));
+				nodes.erase(it, nodes.end());
+			}
+			// Removed nodes are released here, outside the lock
 		}
 
 		/// <summary>
@@ -98,7 +107,12 @@ namespace OSHConnect {
 		/// Remove all nodes from OSHConnect.
 		/// </summary>
 		void removeAllNodes() {
-			nodes.clear();
+			std::vector<std::shared_ptr<OSHNode>> removed;
+			{
+				std::lock_guard lock(mutex);
+				removed.swap(nodes);
+			}
+			// Removed nodes are released here, outside the lock
 		}
 
 		/// <summary>
@@ -107,6 +121,7 @@ namespace OSHConnect {
 		/// <param name="uniqueId">The unique ID of the node to get.</param>
 		/// <returns>The node if found, nullptr otherwise.</returns>
 		std::shared_ptr<OSHNode> getNodeById(const std::string& uniqueId) const {
+			std::lock_guard lock(mutex);
 			for (const auto& node : nodes) {
 				if (node->getUniqueId() == uniqueId) {
 					return node;
@@ -118,8 +133,9 @@ namespace OSHConnect {
 		/// <summary>
 		/// Get a list of nodes in OSHConnect.
 		/// </summary>
-		/// <returns>A vector of all managed nodes.</returns>
-		const std::vector<std::shared_ptr<OSHNode>>& getNodes() const {
+		/// <returns>A snapshot of all managed nodes.</returns>
+		std::vector<std::shared_ptr<OSHNode>> getNodes() const {
+			std::lock_guard lock(mutex);
 			return nodes;
 		}
 

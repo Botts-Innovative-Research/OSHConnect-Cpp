@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <CSAPI/ConnectedSystemsAPI.h>
@@ -19,6 +20,7 @@ namespace OSHConnect {
 	/// Nodes are shared through std::shared_ptr (NodeManager creates them that way) and are not copyable.
 	/// A node owns the systems discovered through it; each system owns its data streams and control streams.
 	/// Children keep a weak link to their parent, and share the node's ConSysAPI, so they stay usable on their own.
+	/// All methods are thread-safe.
 	/// </summary>
 	class OSHNode : public std::enable_shared_from_this<OSHNode> {
 	private:
@@ -27,6 +29,9 @@ namespace OSHConnect {
 		bool isSecure{ false };
 		bool isBasicAuth{ false };
 		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
+		// Guards name and systems. Everything else never changes after construction.
+		// Lock order: a node may lock its systems while holding this lock, never the reverse.
+		mutable std::mutex mutex;
 		std::string name{ "OSH Node" };
 		std::string uniqueId;
 		std::vector<std::shared_ptr<OSHSystem>> systems{};
@@ -35,18 +40,26 @@ namespace OSHConnect {
 		/// Adds a new system or updates an existing one based on the provided system resource.
 		/// </summary>
 		std::shared_ptr<OSHSystem> addOrUpdateSystem(const ConnectedSystemsAPI::DataModels::System& systemResource) {
-			// Update the existing system if there is one
-			for (auto& sys : systems) {
-				if (sys->getId() == systemResource.getId()) {
-					sys->systemResource = systemResource;
-					return sys;
+			// Find or add the system in one step, so concurrent discovery can't add it twice
+			std::shared_ptr<OSHSystem> existing;
+			{
+				std::lock_guard lock(mutex);
+				for (auto& sys : systems) {
+					if (sys->getId() == systemResource.getId()) {
+						existing = sys;
+						break;
+					}
+				}
+				if (!existing) {
+					auto newSystem = std::make_shared<OSHSystem>(weak_from_this(), conSysAPI, systemResource);
+					systems.push_back(newSystem);
+					return newSystem;
 				}
 			}
 
-			// Add a new system if not found
-			auto newSystem = std::make_shared<OSHSystem>(weak_from_this(), conSysAPI, systemResource);
-			systems.push_back(newSystem);
-			return newSystem;
+			// Update the existing system outside the node's lock
+			existing->setSystemResource(systemResource);
+			return existing;
 		}
 
 		/// <summary>
@@ -167,6 +180,7 @@ namespace OSHConnect {
 		bool deleteSystem(const std::string& systemId, const bool cascade = false) {
 			auto response = conSysAPI->getSystemsAPI().deleteSystem(systemId, cascade);
 			if (response.isSuccessful()) {
+				std::lock_guard lock(mutex);
 				systems.erase(std::remove_if(systems.begin(), systems.end(),
 					[&systemId](const std::shared_ptr<OSHSystem>& sys) { return sys->getId() == systemId; }),
 					systems.end());
@@ -193,7 +207,10 @@ namespace OSHConnect {
 		/// <summary>
 		/// The systems discovered so far through this node, without querying the node.
 		/// </summary>
-		const std::vector<std::shared_ptr<OSHSystem>>& getSystems() const { return systems; }
+		std::vector<std::shared_ptr<OSHSystem>> getSystems() const {
+			std::lock_guard lock(mutex);
+			return systems;
+		}
 
 		/// <summary>
 		/// The root URL of the OpenSensorHub server, i.e., localhost:8181/sensorhub.
@@ -210,8 +227,14 @@ namespace OSHConnect {
 		/// <summary>
 		/// Friendly name for the server.
 		/// </summary>
-		const std::string& getName() const { return name; }
-		void setName(const std::string& newName) { name = newName; }
+		std::string getName() const {
+			std::lock_guard lock(mutex);
+			return name;
+		}
+		void setName(const std::string& newName) {
+			std::lock_guard lock(mutex);
+			name = newName;
+		}
 		/// <summary>
 		/// A unique id of the server, for configuration management.
 		/// </summary>

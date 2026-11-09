@@ -12,6 +12,7 @@
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 
+#include "LocalNodeServer.h"
 #include "TestHelper.h"
 #include "../OSHConnect/OSHConnect.h"
 #include "../OSHConnect/OSHNode.h"
@@ -34,54 +35,13 @@ namespace OSHConnectTest
 
 	/// <summary>
 	/// Tests that nodes, systems, and data streams are shared objects with safe parent links.
-	/// A local HTTP server stands in for an OpenSensorHub node with one system and one data stream.
+	/// A LocalNodeServer stands in for an OpenSensorHub node with one system and one data stream.
 	/// </summary>
 	TEST_CLASS(ObjectLifetimeTest)
 	{
-		struct LocalNode {
-			httplib::Server server;
-			std::thread thread;
-			int port = 0;
-			std::string systemName = "System One";
-
-			LocalNode() {
-				server.Get("/sensorhub/api/systems", [this](const httplib::Request&, httplib::Response& res) {
-					res.set_content("{\"items\":[" + system() + "]}", "application/json");
-				});
-				server.Get("/sensorhub/api/systems/sys1", [this](const httplib::Request&, httplib::Response& res) {
-					res.set_content(system(), "application/json");
-				});
-				server.Get("/sensorhub/api/systems/sys1/datastreams", [](const httplib::Request&, httplib::Response& res) {
-					res.set_content(R"({"items":[{"id":"ds1","name":"Data Stream One","outputName":"out1","system@id":"sys1"}]})", "application/json");
-				});
-				server.Get("/sensorhub/api/datastreams/ds1", [](const httplib::Request&, httplib::Response& res) {
-					res.set_content(R"({"id":"ds1","name":"Data Stream One","outputName":"out1","system@id":"sys1"})", "application/json");
-				});
-				server.Get("/sensorhub/api/datastreams/ds1/schema", [](const httplib::Request&, httplib::Response& res) {
-					res.set_content(R"({"obsFormat":"application/om+json","resultSchema":{"type":"DataRecord","name":"rec",
-						"fields":[{"type":"Boolean","name":"flag"}]}})", "application/json");
-				});
-				port = server.bind_to_any_port("127.0.0.1");
-				thread = std::thread([this] { server.listen_after_bind(); });
-				server.wait_until_ready();
-			}
-
-			std::string system() const {
-				return R"({"type":"Feature","id":"sys1","properties":{"featureType":"http://www.w3.org/ns/sosa/Sensor","uid":"urn:test:sys1","name":")"
-					+ systemName + R"("}})";
-			}
-
-			std::string root() const { return "http://127.0.0.1:" + std::to_string(port) + "/sensorhub"; }
-
-			~LocalNode() {
-				server.stop();
-				if (thread.joinable()) thread.join();
-			}
-		};
-
 	public:
 		TEST_METHOD(Discovery_ReturnsTheNodesOwnObjects) {
-			LocalNode local;
+			LocalNodeServer local;
 			OSHConnect::OSHConnect oshConnect;
 			auto node = oshConnect.getNodeManager().addNode(local.root(), "admin", "admin");
 
@@ -95,19 +55,19 @@ namespace OSHConnectTest
 		}
 
 		TEST_METHOD(Updates_AreVisibleToEveryHolder) {
-			LocalNode local;
+			LocalNodeServer local;
 			OSHConnect::OSHConnect oshConnect;
 			auto node = oshConnect.getNodeManager().addNode(local.root(), "admin", "admin");
 			auto held = node->discoverSystems().front();
 
-			local.systemName = "Renamed System";
+			local.setSystemName("Renamed System");
 			node->discoverSystems();
 
 			Assert::AreEqual("Renamed System"s, held->getSystemResource().getProperties().getName());
 		}
 
 		TEST_METHOD(DataStreams_DiscoveredThroughAnyHolder_AreShared) {
-			LocalNode local;
+			LocalNodeServer local;
 			OSHConnect::OSHConnect oshConnect;
 			auto node = oshConnect.getNodeManager().addNode(local.root(), "admin", "admin");
 
@@ -121,7 +81,7 @@ namespace OSHConnectTest
 		}
 
 		TEST_METHOD(ParentLinks_PointAtTheOwningObjects) {
-			LocalNode local;
+			LocalNodeServer local;
 			OSHConnect::OSHConnect oshConnect;
 			auto node = oshConnect.getNodeManager().addNode(local.root(), "admin", "admin");
 			auto system = node->discoverSystems().front();
@@ -132,7 +92,7 @@ namespace OSHConnectTest
 		}
 
 		TEST_METHOD(Children_OutliveTheirNode) {
-			LocalNode local;
+			LocalNodeServer local;
 			std::shared_ptr<OSHConnect::OSHSystem> system;
 			{
 				OSHConnect::OSHConnect oshConnect;

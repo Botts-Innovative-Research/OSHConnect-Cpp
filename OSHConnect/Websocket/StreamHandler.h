@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <algorithm>
 #include <utility>
 #include <stdexcept>
@@ -21,6 +23,15 @@ namespace OSHConnect::Websocket {
 	/// Override the onStreamUpdate method to receive data from the data streams.
 	/// This class manages multiple StreamListener instances and can time-synchronize their events.
 	/// </summary>
+	/// <remarks>
+	/// Threading: all methods are thread-safe. onStreamUpdate is called on the data streams' network threads,
+	/// never on the thread that connected, but never concurrently: the handler delivers one update at a time.
+	/// Keep onStreamUpdate short (in Unreal, hand the data to the game thread), and do not add, remove, or
+	/// disconnect listeners, or shut down the handler, from inside it: that waits for the network threads,
+	/// one of which is the thread running the callback.
+	/// A class deriving from StreamHandler must call shutdown() in its own destructor, so updates stop
+	/// before the derived class's members are destroyed.
+	/// </remarks>
 	class StreamHandler {
 	private:
 		// Internal listener class that forwards events to the handler
@@ -36,16 +47,54 @@ namespace OSHConnect::Websocket {
 			void onStreamUpdate(const StreamEventArgs& args) override {
 				// Forward to handler (could be time-synchronized in the future)
 				if (handler) {
-					handler->onStreamUpdate(args);
+					handler->dispatchStreamUpdate(args);
 				}
 			}
 		};
 
-		std::vector<std::unique_ptr<ManagedStreamListener>> dataStreamListeners;
+		// Guards dataStreamListeners and the settings below. Never held while connecting or delivering updates.
+		mutable std::mutex mutex;
+		// Shared so a listener being connected can't be destroyed by a concurrent removal
+		std::vector<std::shared_ptr<ManagedStreamListener>> dataStreamListeners;
 		std::optional<Constants::RequestFormat> requestFormat;
 		std::optional<ConnectedSystemsAPI::DataModels::TimeExtent> timeExtent;
 		double replaySpeed = 1.0;
 		StreamStatus status = StreamStatus::DISCONNECTED;
+
+		// Serializes onStreamUpdate across the listeners' network threads
+		std::mutex dispatchMutex;
+		std::atomic<bool> acceptingUpdates{ true };
+
+		void dispatchStreamUpdate(const StreamEventArgs& args) {
+			if (!acceptingUpdates) return;
+			std::lock_guard lock(dispatchMutex);
+			if (!acceptingUpdates) return;
+			onStreamUpdate(args);
+		}
+
+		std::vector<std::shared_ptr<ManagedStreamListener>> listenersSnapshot() const {
+			std::lock_guard lock(mutex);
+			return dataStreamListeners;
+		}
+
+		/// <summary>
+		/// Removes the listeners matching the predicate, then disconnects and releases them outside the lock.
+		/// </summary>
+		template<typename Predicate>
+		bool removeListeners(Predicate matches) {
+			std::vector<std::shared_ptr<ManagedStreamListener>> removed;
+			{
+				std::lock_guard lock(mutex);
+				auto it = std::stable_partition(dataStreamListeners.begin(), dataStreamListeners.end(),
+					[&matches](const std::shared_ptr<ManagedStreamListener>& listener) { return !matches(listener); });
+				removed.assign(it, dataStreamListeners.end());
+				dataStreamListeners.erase(it, dataStreamListeners.end());
+			}
+			for (auto& listener : removed) {
+				listener->disconnect();
+			}
+			return !removed.empty();
+		}
 
 	public:
 		StreamHandler() = default;
@@ -60,6 +109,7 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// Virtual method called when a data stream receives an update.
 		/// Override this method in derived classes to handle the incoming data.
+		/// Called on a network thread, one update at a time; see the class remarks.
 		/// </summary>
 		/// <param name="args">The event arguments containing the data and metadata.</param>
 		virtual void onStreamUpdate(const StreamEventArgs& args) {
@@ -70,24 +120,37 @@ namespace OSHConnect::Websocket {
 		/// Connects to all data streams.
 		/// </summary>
 		void connect() {
-			if (status == StreamStatus::SHUTDOWN) {
-				throw std::runtime_error("Handler has been shut down.");
+			std::vector<std::shared_ptr<ManagedStreamListener>> listeners;
+			{
+				std::lock_guard lock(mutex);
+				if (status == StreamStatus::SHUTDOWN) {
+					throw std::runtime_error("Handler has been shut down.");
+				}
+				listeners = dataStreamListeners;
 			}
 
-			for (auto& listener : dataStreamListeners) {
+			for (auto& listener : listeners) {
 				listener->connect();
 			}
-			status = StreamStatus::CONNECTED;
+
+			std::lock_guard lock(mutex);
+			if (status != StreamStatus::SHUTDOWN) {
+				status = StreamStatus::CONNECTED;
+			}
 		}
 
 		/// <summary>
 		/// Disconnects from all data streams.
 		/// </summary>
 		void disconnect() {
-			for (auto& listener : dataStreamListeners) {
+			for (auto& listener : listenersSnapshot()) {
 				listener->disconnect();
 			}
-			status = StreamStatus::DISCONNECTED;
+
+			std::lock_guard lock(mutex);
+			if (status != StreamStatus::SHUTDOWN) {
+				status = StreamStatus::DISCONNECTED;
+			}
 		}
 
 		/// <summary>
@@ -96,8 +159,12 @@ namespace OSHConnect::Websocket {
 		/// The handler will no longer be usable after this method is called.
 		/// </summary>
 		void shutdown() {
+			acceptingUpdates = false;
+			{
+				std::lock_guard lock(mutex);
+				status = StreamStatus::SHUTDOWN;
+			}
 			shutdownAllDataStreamListeners();
-			status = StreamStatus::SHUTDOWN;
 		}
 
 		/// <summary>
@@ -106,37 +173,50 @@ namespace OSHConnect::Websocket {
 		/// If the data stream is already in the handler, returns the existing listener.
 		/// </summary>
 		/// <param name="dataStream">The data stream to add. The handler shares ownership of it.</param>
-		/// <returns>Pointer to the StreamListener managing this data stream, or nullptr if the data stream is null.</returns>
+		/// <returns>Pointer to the StreamListener managing this data stream, valid until the listener is removed
+		/// or the handler shut down; nullptr if the data stream is null.</returns>
 		StreamListener* addDataStreamListener(const std::shared_ptr<OSHDataStream>& dataStream) {
 			if (!dataStream) return nullptr;
 
-			// Check if already exists
-			for (auto& listener : dataStreamListeners) {
-				if (listener->getDataStream()->getId() == dataStream->getId()) {
-					return listener.get();
+			std::shared_ptr<ManagedStreamListener> listener;
+			bool connectNow = false;
+			{
+				// Find or add the listener in one step, so concurrent calls can't add it twice
+				std::lock_guard lock(mutex);
+				for (auto& existing : dataStreamListeners) {
+					if (existing->getDataStream()->getId() == dataStream->getId()) {
+						return existing.get();
+					}
+				}
+
+				listener = std::make_shared<ManagedStreamListener>(dataStream, this);
+
+				// Apply current settings
+				if (requestFormat.has_value()) {
+					listener->setRequestFormat(requestFormat.value());
+				}
+				listener->setReplaySpeed(replaySpeed);
+				if (timeExtent.has_value()) {
+					listener->setTimeExtent(timeExtent.value());
+				}
+
+				dataStreamListeners.push_back(listener);
+				connectNow = status == StreamStatus::CONNECTED;
+			}
+
+			// Connect if handler is already connected, outside the lock since connecting blocks.
+			// If it fails, the listener is not kept, as before.
+			if (connectNow) {
+				try {
+					listener->connect();
+				}
+				catch (...) {
+					removeListeners([&listener](const std::shared_ptr<ManagedStreamListener>& l) { return l == listener; });
+					throw;
 				}
 			}
 
-			// Create new listener
-			auto listener = std::make_unique<ManagedStreamListener>(dataStream, this);
-
-			// Apply current settings
-			if (requestFormat.has_value()) {
-				listener->setRequestFormat(requestFormat.value());
-			}
-			listener->setReplaySpeed(replaySpeed);
-			if (timeExtent.has_value()) {
-				listener->setTimeExtent(timeExtent.value());
-			}
-
-			// Connect if handler is already connected
-			if (status == StreamStatus::CONNECTED) {
-				listener->connect();
-			}
-
-			auto* ptr = listener.get();
-			dataStreamListeners.push_back(std::move(listener));
-			return ptr;
+			return listener.get();
 		}
 
 		/// <summary>
@@ -145,17 +225,10 @@ namespace OSHConnect::Websocket {
 		/// <param name="dataStream">The data stream to remove.</param>
 		/// <returns>True if the listener was shut down and removed, false if not found.</returns>
 		bool shutdownDataStreamListener(const OSHDataStream& dataStream) {
-			auto it = std::find_if(dataStreamListeners.begin(), dataStreamListeners.end(),
-				[&dataStream](const std::unique_ptr<ManagedStreamListener>& listener) {
-				return listener->getDataStream()->getId() == dataStream.getId();
+			const auto id = dataStream.getId();
+			return removeListeners([&id](const std::shared_ptr<ManagedStreamListener>& listener) {
+				return listener->getDataStream()->getId() == id;
 			});
-
-			if (it != dataStreamListeners.end()) {
-				(*it)->disconnect();
-				dataStreamListeners.erase(it);
-				return true;
-			}
-			return false;
 		}
 
 		/// <summary>
@@ -165,34 +238,23 @@ namespace OSHConnect::Websocket {
 		/// <returns>True if the listener was removed, false if not found.</returns>
 		bool shutdownDataStreamListener(StreamListener* listener) {
 			if (!listener) return false;
-
-			auto it = std::find_if(dataStreamListeners.begin(), dataStreamListeners.end(),
-				[listener](const std::unique_ptr<ManagedStreamListener>& l) {
+			return removeListeners([listener](const std::shared_ptr<ManagedStreamListener>& l) {
 				return l.get() == listener;
 			});
-
-			if (it != dataStreamListeners.end()) {
-				(*it)->disconnect();
-				dataStreamListeners.erase(it);
-				return true;
-			}
-			return false;
 		}
 
 		/// <summary>
 		/// Shuts down all data streams and removes them from the handler.
 		/// </summary>
 		void shutdownAllDataStreamListeners() {
-			for (auto& listener : dataStreamListeners) {
-				listener->disconnect();
-			}
-			dataStreamListeners.clear();
+			removeListeners([](const std::shared_ptr<ManagedStreamListener>&) { return true; });
 		}
 
 		/// <summary>
 		/// Get the number of data stream listeners in the handler.
 		/// </summary>
 		size_t getDataStreamListenerCount() const {
+			std::lock_guard lock(mutex);
 			return dataStreamListeners.size();
 		}
 
@@ -201,6 +263,7 @@ namespace OSHConnect::Websocket {
 		/// If nullopt, the format will not be specified in the request.
 		/// </summary>
 		std::optional<Constants::RequestFormat> getRequestFormat() const {
+			std::lock_guard lock(mutex);
 			return requestFormat;
 		}
 
@@ -209,8 +272,11 @@ namespace OSHConnect::Websocket {
 		/// Calling this will reconnect any connected listeners.
 		/// </summary>
 		void setRequestFormat(Constants::RequestFormat format) {
-			requestFormat = format;
-			for (auto& listener : dataStreamListeners) {
+			{
+				std::lock_guard lock(mutex);
+				requestFormat = format;
+			}
+			for (auto& listener : listenersSnapshot()) {
 				listener->setRequestFormat(format);
 			}
 		}
@@ -220,6 +286,7 @@ namespace OSHConnect::Websocket {
 		/// If nullopt, will listen to the data streams in real-time.
 		/// </summary>
 		std::optional<ConnectedSystemsAPI::DataModels::TimeExtent> getTimeExtent() const {
+			std::lock_guard lock(mutex);
 			return timeExtent;
 		}
 
@@ -228,8 +295,11 @@ namespace OSHConnect::Websocket {
 		/// Calling this will reconnect any connected listeners.
 		/// </summary>
 		void setTimeExtent(const ConnectedSystemsAPI::DataModels::TimeExtent& extent) {
-			timeExtent = extent;
-			for (auto& listener : dataStreamListeners) {
+			{
+				std::lock_guard lock(mutex);
+				timeExtent = extent;
+			}
+			for (auto& listener : listenersSnapshot()) {
 				listener->setTimeExtent(extent);
 			}
 		}
@@ -240,6 +310,7 @@ namespace OSHConnect::Websocket {
 		/// 1.0 is default speed, 0.1 is 10x slower, 10.0 is 10x faster.
 		/// </summary>
 		double getReplaySpeed() const {
+			std::lock_guard lock(mutex);
 			return replaySpeed;
 		}
 
@@ -248,8 +319,11 @@ namespace OSHConnect::Websocket {
 		/// Calling this will reconnect any connected listeners.
 		/// </summary>
 		void setReplaySpeed(double speed) {
-			replaySpeed = speed;
-			for (auto& listener : dataStreamListeners) {
+			{
+				std::lock_guard lock(mutex);
+				replaySpeed = speed;
+			}
+			for (auto& listener : listenersSnapshot()) {
 				listener->setReplaySpeed(speed);
 			}
 		}
@@ -258,6 +332,7 @@ namespace OSHConnect::Websocket {
 		/// The status of the data stream handler.
 		/// </summary>
 		StreamStatus getStatus() const {
+			std::lock_guard lock(mutex);
 			return status;
 		}
 	};

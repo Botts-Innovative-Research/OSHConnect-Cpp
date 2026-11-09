@@ -54,6 +54,13 @@ namespace OSHConnect::Websocket {
 	/// To listen to multiple data streams, use a StreamHandler.
 	/// This class is thread-safe.
 	/// </summary>
+	/// <remarks>
+	/// onStreamUpdate and status listeners are called on the listener's network thread. Keep them short
+	/// (in Unreal, hand the data to the game thread), and do not call connect, disconnect, or shutdown from
+	/// inside them: those wait for the network thread, which is the thread running the callback.
+	/// A class deriving from StreamListener must call shutdown() in its own destructor, so updates stop
+	/// before the derived class's members are destroyed.
+	/// </remarks>
 	class StreamListener {
 	private:
 		static inline const std::regex dateRegexText{ R"(\d{4}-\d{2}-\d{2}T\d{2}:)" };
@@ -662,7 +669,7 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// Called when the data stream receives an update.
 		/// Override this method in derived classes to handle the incoming data as needed.
-		/// This method may be called from the listen() thread.
+		/// Called on the listener's network thread; see the class remarks.
 		/// </summary>
 		/// <param name="args">The event arguments containing the data and metadata.</param>
 		virtual void onStreamUpdate(const StreamEventArgs & args) {
@@ -739,6 +746,7 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// Adds a status listener to be notified of connection state changes.
 		/// Thread-safe: can be called from multiple threads.
+		/// The listener is called on the network thread, or on the thread that called connect, disconnect, or shutdown.
 		/// </summary>
 		/// <param name="listener">The listener callback function.</param>
 		/// <returns>A unique ID for this listener, used for removal.</returns>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <CSAPI/DataModels/DataStream.h>
@@ -15,12 +16,20 @@ namespace OSHConnect {
 	/// A data stream of a system on an OpenSensorHub node.
 	/// Data streams are owned by their system and shared through std::shared_ptr, so every holder sees the same,
 	/// up-to-date object. They are not copyable.
+	/// All methods are thread-safe.
 	/// </summary>
 	class OSHDataStream {
 	private:
 		std::weak_ptr<OSHSystem> parentSystem;
 		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
+		// Guards dataStreamResource. The parent link and API never change after construction.
+		mutable std::mutex mutex;
 		ConnectedSystemsAPI::DataModels::DataStream dataStreamResource;
+
+		void setDataStreamResource(const ConnectedSystemsAPI::DataModels::DataStream& resource) {
+			std::lock_guard lock(mutex);
+			dataStreamResource = resource;
+		}
 
 		friend class OSHSystem;
 
@@ -74,7 +83,7 @@ namespace OSHConnect {
 		bool refreshDataStream() {
 			auto response = getConSysAPI().getDataStreamsAPI().getDataStreamById(getId());
 			if (response.isSuccessful()) {
-				dataStreamResource = response.getItem();
+				setDataStreamResource(response.getItem());
 				return true;
 			}
 			return false;
@@ -128,12 +137,18 @@ namespace OSHConnect {
 		/// <summary>
 		/// The ID of the data stream. Same as dataStreamResource.getId().
 		/// </summary>
-		const std::string& getId() const { return dataStreamResource.getId().value(); }
+		std::string getId() const {
+			std::lock_guard lock(mutex);
+			return dataStreamResource.getId().value();
+		}
 
 		/// <summary>
 		/// The data stream resource representing this data stream.
 		/// </summary>
-		ConnectedSystemsAPI::DataModels::DataStream getDataStreamResource() const { return dataStreamResource; }
+		ConnectedSystemsAPI::DataModels::DataStream getDataStreamResource() const {
+			std::lock_guard lock(mutex);
+			return dataStreamResource;
+		}
 
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.

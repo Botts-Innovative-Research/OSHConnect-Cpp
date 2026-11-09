@@ -6,6 +6,15 @@
 #include "StreamManager.h"
 
 namespace OSHConnect {
+	/// <summary>
+	/// Entry point of the library: manages the nodes (NodeManager) and data stream handlers (StreamManager).
+	/// </summary>
+	/// <remarks>
+	/// Threading: NodeManager, OSHNode, OSHSystem, OSHDataStream, OSHControlStream, StreamManager, StreamHandler,
+	/// and StreamListener are all thread-safe. Requests to a node block, so make them off any UI or game thread.
+	/// Data stream updates and status changes are delivered on network threads; a StreamHandler delivers them
+	/// one at a time. In Unreal, hand them to the game thread before touching any UObject.
+	/// </remarks>
 	class OSHConnect {
 	private:
 		std::string name;

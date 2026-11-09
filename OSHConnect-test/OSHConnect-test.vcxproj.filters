@@ -36,6 +36,9 @@
     <ClCompile Include="ObjectLifetimeTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="ConcurrencyTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
     <ClCompile Include="QueryStringBuilderTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
@@ -72,6 +75,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TestHelper.h">
+      <Filter>Resource Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LocalNodeServer.h">
       <Filter>Resource Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <CSAPI/DataModels/System.h>
 #include <CSAPI/Query/ControlStreamsOfSystemQuery.h>
@@ -24,11 +25,15 @@ namespace OSHConnect {
 	/// A system on an OpenSensorHub node.
 	/// Systems are owned by their node and shared through std::shared_ptr, so every holder sees the same,
 	/// up-to-date object. They own the data streams and control streams discovered through them, and are not copyable.
+	/// All methods are thread-safe.
 	/// </summary>
 	class OSHSystem : public std::enable_shared_from_this<OSHSystem> {
 	private:
 		std::weak_ptr<OSHNode> parentNode;
 		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
+		// Guards systemResource and the discovered streams. The parent link and API never change after construction.
+		// Lock order: a system may lock its streams while holding this lock, never the reverse.
+		mutable std::mutex mutex;
 		ConnectedSystemsAPI::DataModels::System systemResource;
 		std::vector<std::shared_ptr<OSHDataStream>> discoveredDataStreams{};
 		std::vector<std::shared_ptr<OSHControlStream>> discoveredControlStreams{};
@@ -45,18 +50,26 @@ namespace OSHConnect {
 			builder.withSchema(response.getItem());
 			auto dataStreamResourceNew = builder.build();
 
-			// Update the existing data stream if there is one
-			for (auto& ds : discoveredDataStreams) {
-				if (ds->getId() == dataStreamResourceNew.getId()) {
-					ds->dataStreamResource = dataStreamResourceNew;
-					return ds;
+			// Find or add the data stream in one step, so concurrent discovery can't add it twice
+			std::shared_ptr<OSHDataStream> existing;
+			{
+				std::lock_guard lock(mutex);
+				for (auto& ds : discoveredDataStreams) {
+					if (ds->getId() == dataStreamResourceNew.getId()) {
+						existing = ds;
+						break;
+					}
+				}
+				if (!existing) {
+					auto newDataStream = std::make_shared<OSHDataStream>(weak_from_this(), conSysAPI, dataStreamResourceNew);
+					discoveredDataStreams.push_back(newDataStream);
+					return newDataStream;
 				}
 			}
 
-			// Add a new data stream if not found
-			auto newDataStream = std::make_shared<OSHDataStream>(weak_from_this(), conSysAPI, dataStreamResourceNew);
-			discoveredDataStreams.push_back(newDataStream);
-			return newDataStream;
+			// Update the existing data stream outside the system's lock
+			existing->setDataStreamResource(dataStreamResourceNew);
+			return existing;
 		}
 
 		std::shared_ptr<OSHControlStream> addOrUpdateControlStream(const ConnectedSystemsAPI::DataModels::ControlStream& controlStreamResource) {
@@ -71,18 +84,31 @@ namespace OSHConnect {
 			builder.withSchema(response.getItem());
 			auto controlStreamResourceNew = builder.build();
 
-			// Update the existing control stream if there is one
-			for (auto& cs : discoveredControlStreams) {
-				if (cs->getId() == controlStreamResourceNew.getId()) {
-					cs->controlStreamResource = controlStreamResourceNew;
-					return cs;
+			// Find or add the control stream in one step, so concurrent discovery can't add it twice
+			std::shared_ptr<OSHControlStream> existing;
+			{
+				std::lock_guard lock(mutex);
+				for (auto& cs : discoveredControlStreams) {
+					if (cs->getId() == controlStreamResourceNew.getId()) {
+						existing = cs;
+						break;
+					}
+				}
+				if (!existing) {
+					auto newControlStream = std::make_shared<OSHControlStream>(weak_from_this(), conSysAPI, controlStreamResourceNew);
+					discoveredControlStreams.push_back(newControlStream);
+					return newControlStream;
 				}
 			}
 
-			// Add a new control stream if not found
-			auto newControlStream = std::make_shared<OSHControlStream>(weak_from_this(), conSysAPI, controlStreamResourceNew);
-			discoveredControlStreams.push_back(newControlStream);
-			return newControlStream;
+			// Update the existing control stream outside the system's lock
+			existing->setControlStreamResource(controlStreamResourceNew);
+			return existing;
+		}
+
+		void setSystemResource(const ConnectedSystemsAPI::DataModels::System& resource) {
+			std::lock_guard lock(mutex);
+			systemResource = resource;
 		}
 
 		friend class OSHNode;
@@ -164,7 +190,7 @@ namespace OSHConnect {
 		bool refreshSystem() {
 			auto response = getConSysAPI().getSystemsAPI().getSystemById(getId());
 			if (response.isSuccessful()) {
-				systemResource = response.getItem();
+				setSystemResource(response.getItem());
 				return true;
 			}
 			return false;
@@ -207,6 +233,7 @@ namespace OSHConnect {
 		bool deleteDataStream(const std::string& dataStreamId, const bool cascade = false) {
 			auto response = getConSysAPI().getDataStreamsAPI().deleteDataStream(dataStreamId, cascade);
 			if (response.isSuccessful()) {
+				std::lock_guard lock(mutex);
 				discoveredDataStreams.erase(std::remove_if(discoveredDataStreams.begin(), discoveredDataStreams.end(),
 					[&dataStreamId](const std::shared_ptr<OSHDataStream>& ds) { return ds->getId() == dataStreamId; }),
 					discoveredDataStreams.end());
@@ -250,6 +277,7 @@ namespace OSHConnect {
 		bool deleteControlStream(const std::string& controlStreamId, const bool cascade = false) {
 			auto response = getConSysAPI().getControlStreamsAPI().deleteControlStream(controlStreamId, cascade);
 			if (response.isSuccessful()) {
+				std::lock_guard lock(mutex);
 				discoveredControlStreams.erase(std::remove_if(discoveredControlStreams.begin(), discoveredControlStreams.end(),
 					[&controlStreamId](const std::shared_ptr<OSHControlStream>& cs) { return cs->getId() == controlStreamId; }),
 					discoveredControlStreams.end());
@@ -322,21 +350,33 @@ namespace OSHConnect {
 		/// <summary>
 		/// The data streams discovered so far through this system, without querying the node.
 		/// </summary>
-		const std::vector<std::shared_ptr<OSHDataStream>>& getDataStreams() const { return discoveredDataStreams; }
+		std::vector<std::shared_ptr<OSHDataStream>> getDataStreams() const {
+			std::lock_guard lock(mutex);
+			return discoveredDataStreams;
+		}
 
 		/// <summary>
 		/// The control streams discovered so far through this system, without querying the node.
 		/// </summary>
-		const std::vector<std::shared_ptr<OSHControlStream>>& getControlStreams() const { return discoveredControlStreams; }
+		std::vector<std::shared_ptr<OSHControlStream>> getControlStreams() const {
+			std::lock_guard lock(mutex);
+			return discoveredControlStreams;
+		}
 
 		/// <summary>
 		/// The system resource representing this system.
 		/// </summary>
-		ConnectedSystemsAPI::DataModels::System getSystemResource() const { return systemResource; }
+		ConnectedSystemsAPI::DataModels::System getSystemResource() const {
+			std::lock_guard lock(mutex);
+			return systemResource;
+		}
 		/// <summary>
 		/// The ID of the system. Same as systemResource.getId().
 		/// </summary>
-		std::string getId() const { return systemResource.getId(); }
+		std::string getId() const {
+			std::lock_guard lock(mutex);
+			return systemResource.getId();
+		}
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.
 		/// Shared with the node, so it remains usable even if the node is removed.

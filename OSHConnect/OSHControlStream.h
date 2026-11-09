@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <CSAPI/ConnectedSystemsAPI.h>
@@ -15,12 +16,20 @@ namespace OSHConnect {
 	/// A control stream of a system on an OpenSensorHub node.
 	/// Control streams are owned by their system and shared through std::shared_ptr, so every holder sees the same,
 	/// up-to-date object. They are not copyable.
+	/// All methods are thread-safe.
 	/// </summary>
 	class OSHControlStream {
 	private:
 		std::weak_ptr<OSHSystem> parentSystem;
 		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
+		// Guards controlStreamResource. The parent link and API never change after construction.
+		mutable std::mutex mutex;
 		ConnectedSystemsAPI::DataModels::ControlStream controlStreamResource;
+
+		void setControlStreamResource(const ConnectedSystemsAPI::DataModels::ControlStream& resource) {
+			std::lock_guard lock(mutex);
+			controlStreamResource = resource;
+		}
 
 		friend class OSHSystem;
 
@@ -74,7 +83,7 @@ namespace OSHConnect {
 		bool refreshControlStream() {
 			auto response = getConSysAPI().getControlStreamsAPI().getControlStreamById(getId());
 			if (response.isSuccessful()) {
-				controlStreamResource = response.getItem();
+				setControlStreamResource(response.getItem());
 				return true;
 			}
 			return false;
@@ -128,12 +137,18 @@ namespace OSHConnect {
 		/// <summary>
 		/// The ID of the control stream. Same as controlStreamResource.getId().
 		/// </summary>
-		const std::string& getId() const { return controlStreamResource.getId().value(); }
+		std::string getId() const {
+			std::lock_guard lock(mutex);
+			return controlStreamResource.getId().value();
+		}
 
 		/// <summary>
 		/// The control stream resource representing this control stream.
 		/// </summary>
-		ConnectedSystemsAPI::DataModels::ControlStream getControlStreamResource() const { return controlStreamResource; }
+		ConnectedSystemsAPI::DataModels::ControlStream getControlStreamResource() const {
+			std::lock_guard lock(mutex);
+			return controlStreamResource;
+		}
 
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.

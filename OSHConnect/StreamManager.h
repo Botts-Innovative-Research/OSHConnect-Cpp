@@ -3,6 +3,7 @@
 #include <vector>
 #include <unordered_set>
 #include <memory>
+#include <mutex>
 #include <functional>
 #include <algorithm>
 #include <utility>
@@ -15,7 +16,7 @@ namespace OSHConnect {
 	class OSHConnect;
 
 	/// <summary>
-	/// Manages data stream handlers and their associated data streams.
+	/// Manages data stream handlers and their associated data streams. All methods are thread-safe.
 	/// </summary>
 	class StreamManager {
 	private:
@@ -23,6 +24,11 @@ namespace OSHConnect {
 		/// Data stream handlers created and owned by this manager.
 		/// </summary>
 		std::vector<std::unique_ptr<Websocket::StreamHandler>> ownedHandlers;
+
+		/// <summary>
+		/// Guards ownedHandlers and externalHandlers. Handlers are shut down outside it.
+		/// </summary>
+		mutable std::mutex mutex;
 
 		/// <summary>
 		/// External data stream handlers added to this manager (not owned).
@@ -66,6 +72,12 @@ namespace OSHConnect {
 					: callback(std::move(callback)) {
 				}
 
+				// Shut down before the callback is destroyed: the base class destructor runs after this class's
+				// members are gone, while network threads could still be delivering updates
+				~CallbackStreamHandler() override {
+					shutdown();
+				}
+
 				void onStreamUpdate(const Websocket::StreamEventArgs& args) override {
 					if (callback) {
 						callback(args);
@@ -75,6 +87,7 @@ namespace OSHConnect {
 
 			auto handler = std::make_unique<CallbackStreamHandler>(std::move(onStreamUpdate));
 			auto* ptr = handler.get();
+			std::lock_guard lock(mutex);
 			ownedHandlers.push_back(std::move(handler));
 			return ptr;
 		}
@@ -87,6 +100,7 @@ namespace OSHConnect {
 		/// <param name="handler">The data stream handler to add.</param>
 		void addDataStreamHandler(Websocket::StreamHandler* handler) {
 			if (handler) {
+				std::lock_guard lock(mutex);
 				externalHandlers.insert(handler);
 			}
 		}
@@ -98,6 +112,7 @@ namespace OSHConnect {
 		/// <returns>A vector of pointers to data stream handlers.</returns>
 		std::vector<Websocket::StreamHandler*> getDataStreamHandlers() const {
 			std::vector<Websocket::StreamHandler*> result;
+			std::lock_guard lock(mutex);
 
 			// Add owned handlers
 			for (const auto& handler : ownedHandlers) {
@@ -121,20 +136,19 @@ namespace OSHConnect {
 		void shutdownDataStreamHandler(Websocket::StreamHandler* handler) {
 			if (!handler) return;
 
-			// Shutdown the handler
+			// Take the handler out of the manager, then shut it down (and destroy it, if owned) outside the lock
+			std::unique_ptr<Websocket::StreamHandler> owned;
+			{
+				std::lock_guard lock(mutex);
+				externalHandlers.erase(handler);
+				auto it = std::find_if(ownedHandlers.begin(), ownedHandlers.end(),
+					[handler](const std::unique_ptr<Websocket::StreamHandler>& h) { return h.get() == handler; });
+				if (it != ownedHandlers.end()) {
+					owned = std::move(*it);
+					ownedHandlers.erase(it);
+				}
+			}
 			handler->shutdown();
-
-			// Remove from external handlers
-			externalHandlers.erase(handler);
-
-			// Remove from owned handlers (and destroy if owned)
-			ownedHandlers.erase(
-				std::remove_if(ownedHandlers.begin(), ownedHandlers.end(),
-					[handler](const std::unique_ptr<Websocket::StreamHandler>& h) {
-				return h.get() == handler;
-			}),
-				ownedHandlers.end()
-			);
 		}
 
 		/// <summary>
@@ -142,17 +156,24 @@ namespace OSHConnect {
 		/// and remove them from OSHConnect.
 		/// </summary>
 		void shutdownDataStreamHandlers() {
-			// Shutdown owned handlers
-			for (auto const& handler : ownedHandlers) {
+			// Take every handler out of the manager, then shut them down outside the lock
+			std::vector<std::unique_ptr<Websocket::StreamHandler>> owned;
+			std::unordered_set<Websocket::StreamHandler*> external;
+			{
+				std::lock_guard lock(mutex);
+				owned.swap(ownedHandlers);
+				external.swap(externalHandlers);
+			}
+
+			// Shutdown owned handlers (destroyed when owned goes out of scope)
+			for (auto const& handler : owned) {
 				handler->shutdown();
 			}
-			ownedHandlers.clear();
 
 			// Shutdown external handlers (but don't delete them)
-			for (auto* handler : externalHandlers) {
+			for (auto* handler : external) {
 				handler->shutdown();
 			}
-			externalHandlers.clear();
 		}
 
 	private:

@@ -175,6 +175,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="ConcurrencyTest.cpp" />
     <ClCompile Include="ControlStreamIntegrationTest.cpp" />
     <ClCompile Include="DataStreamIntegrationTest.cpp" />
     <ClCompile Include="NodeConnectionTest.cpp" />
@@ -197,6 +198,7 @@
     <ClCompile Include="WebsocketIntegrationTest.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="LocalNodeServer.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="TestHelper.h" />
   </ItemGroup>
