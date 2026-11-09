@@ -16,60 +16,60 @@ namespace OSHConnectTest
 		TEST_METHOD(AddNode_ByCredentials) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode addedNode = nodeManager.addNode("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
-			Assert::AreEqual(std::string("node-001"), addedNode.getUniqueId());
+			auto addedNode = nodeManager.addNode("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
+			Assert::AreEqual(std::string("node-001"), addedNode->getUniqueId());
 		}
 
 		TEST_METHOD(AddNode_ByCredentials_EncodesUsernameAndPassword) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode addedNode = nodeManager.addNode("localhost:8282/sensorhub", "admin", "password");
-			Assert::IsTrue(addedNode.getIsBasicAuth());
-			Assert::AreEqual(std::string("YWRtaW46cGFzc3dvcmQ="), addedNode.getAuthenticationToken());
-			Assert::AreEqual(std::string("Basic YWRtaW46cGFzc3dvcmQ="), addedNode.getConSysAPI().getAuthHeader());
+			auto addedNode = nodeManager.addNode("localhost:8282/sensorhub", "admin", "password");
+			Assert::IsTrue(addedNode->getIsBasicAuth());
+			Assert::AreEqual(std::string("YWRtaW46cGFzc3dvcmQ="), addedNode->getAuthenticationToken());
+			Assert::AreEqual(std::string("Basic YWRtaW46cGFzc3dvcmQ="), addedNode->getConSysAPI().getAuthHeader());
 		}
 
 		TEST_METHOD(AddNode_Http_ApiRootKeepsScheme) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto node = oshConnect.getNodeManager().addNode("http://example.com:8282/sensorhub", "admin", "admin");
-			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node.getConSysAPI().getApiRoot());
+			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node->getConSysAPI().getApiRoot());
 		}
 
 		TEST_METHOD(AddNode_Https_ApiRootKeepsScheme) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto node = oshConnect.getNodeManager().addNode("https://example.com/sensorhub", "admin", "admin");
-			Assert::IsTrue(node.getIsSecure());
-			Assert::AreEqual(std::string("https://example.com/sensorhub/api"), node.getConSysAPI().getApiRoot());
+			Assert::IsTrue(node->getIsSecure());
+			Assert::AreEqual(std::string("https://example.com/sensorhub/api"), node->getConSysAPI().getApiRoot());
 		}
 
 		TEST_METHOD(AddNode_NoScheme_ApiRootUsesHttp) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto node = oshConnect.getNodeManager().addNode("example.com:8282/sensorhub", "admin", "admin");
-			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node.getConSysAPI().getApiRoot());
+			Assert::AreEqual(std::string("http://example.com:8282/sensorhub/api"), node->getConSysAPI().getApiRoot());
 		}
 
 		TEST_METHOD(AddNode_ByNode) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode newNode("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
-			OSHConnect::OSHNode addedNode = nodeManager.addNode(newNode);
-			Assert::AreEqual(std::string("node-001"), addedNode.getUniqueId());
+			auto newNode = std::make_shared<OSHConnect::OSHNode>("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
+			auto addedNode = nodeManager.addNode(newNode);
+			Assert::AreEqual(std::string("node-001"), addedNode->getUniqueId());
 		}
 
 		TEST_METHOD(AddNode_DuplicateNode) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode newNode("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
+			auto newNode = std::make_shared<OSHConnect::OSHNode>("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
 			nodeManager.addNode(newNode);
-			OSHConnect::OSHNode addedNode = nodeManager.addNode(newNode);
-			Assert::AreEqual(std::string("node-001"), addedNode.getUniqueId());
+			auto addedNode = nodeManager.addNode(newNode);
+			Assert::AreEqual(std::string("node-001"), addedNode->getUniqueId());
 		}
 
 		TEST_METHOD(GetNodes_Count) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode newNode1("localhost:8282/sensorhub", "admin", "admin", "TestNode1", "node-001");
-			OSHConnect::OSHNode newNode2("localhost:8282/sensorhub", "admin", "admin", "TestNode2", "node-002");
+			auto newNode1 = std::make_shared<OSHConnect::OSHNode>("localhost:8282/sensorhub", "admin", "admin", "TestNode1", "node-001");
+			auto newNode2 = std::make_shared<OSHConnect::OSHNode>("localhost:8282/sensorhub", "admin", "admin", "TestNode2", "node-002");
 			nodeManager.addNode(newNode1);
 			nodeManager.addNode(newNode2);
 			const auto& nodes = nodeManager.getNodes();
@@ -97,9 +97,9 @@ namespace OSHConnectTest
 		TEST_METHOD(RemoveNode_ByNode) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto& nodeManager = oshConnect.getNodeManager();
-			OSHConnect::OSHNode newNode("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
+			auto newNode = std::make_shared<OSHConnect::OSHNode>("localhost:8282/sensorhub", "admin", "admin", "TestNode", "node-001");
 			nodeManager.addNode(newNode);
-			nodeManager.removeNode(newNode);
+			nodeManager.removeNode(*newNode);
 			const auto& nodes = nodeManager.getNodes();
 			Assert::AreEqual(size_t(0), nodes.size());
 		}

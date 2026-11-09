@@ -31,24 +31,24 @@ namespace OSHConnectTest {
 		}
 
 		TEST_METHOD(DiscoverSystems) {
-			auto systems = helper.node.discoverSystems();
+			auto systems = helper.node->discoverSystems();
 			Assert::IsFalse(systems.empty());
 		}
 
 		TEST_METHOD(GetSystemById) {
-			auto systemOpt = helper.node.getSystemById(helper.systemId);
-			Assert::IsTrue(systemOpt.has_value());
+			auto systemOpt = helper.node->getSystemById(helper.systemId);
+			Assert::IsNotNull(systemOpt.get());
 		}
 
 		TEST_METHOD(RefreshSystem) {
-			auto system = TestHelper::assertNotEmptyAndGetFirst(helper.node.discoverSystems());
-			bool refreshed = system.refreshSystem();
+			auto system = TestHelper::assertNotEmptyAndGetFirst(helper.node->discoverSystems());
+			bool refreshed = system->refreshSystem();
 			Assert::IsTrue(refreshed);
 		}
 
 		TEST_METHOD(DeleteSystem) {
 			Assert::IsFalse(helper.systemId.empty());
-			bool deleted = helper.node.deleteSystem(helper.systemId, true);
+			bool deleted = helper.node->deleteSystem(helper.systemId, true);
 			Assert::IsTrue(deleted);
 		}
 	};

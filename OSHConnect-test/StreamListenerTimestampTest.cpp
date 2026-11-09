@@ -38,7 +38,8 @@ namespace OSHConnectTest
 
 		static int64_t timestampOf(const std::string& payload) {
 			TestHelper helper;
-			OSHDataStream dataStream(nullptr, helper.createTestDataStreamObject());
+			auto dataStream = std::make_shared<OSHDataStream>(std::weak_ptr<OSHSystem>(), std::shared_ptr<ConnectedSystemsAPI::ConSysAPI>(),
+				helper.createTestDataStreamObject());
 			TimestampListener listener(dataStream);
 			listener.onStreamUpdate(std::vector<uint8_t>(payload.begin(), payload.end()));
 			return listener.timestamp;

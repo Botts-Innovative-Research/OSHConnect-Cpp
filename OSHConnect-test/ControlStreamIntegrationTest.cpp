@@ -19,14 +19,14 @@ namespace OSHConnectTest {
 		TestHelper helper = TestHelper();
 
 		TEST_METHOD(TestControlStreams) {
-			auto systems = helper.node.discoverSystems();
+			auto systems = helper.node->discoverSystems();
 			auto system = TestHelper::assertNotEmptyAndGetFirst(systems);
-			auto controlStreams = system.discoverControlStreams();
+			auto controlStreams = system->discoverControlStreams();
 			Assert::IsFalse(controlStreams.empty());
 			auto& controlStream = TestHelper::assertNotEmptyAndGetFirst(controlStreams);
-			std::cout << "Control Stream: " << controlStream.getId() << std::endl;
+			std::cout << "Control Stream: " << controlStream->getId() << std::endl;
 
-			auto commands = controlStream.fetchCommands();
+			auto commands = controlStream->fetchCommands();
 			for (const auto& command : commands) {
 				std::cout << "Command: " << command.toJson().dump(2) << std::endl;
 			}

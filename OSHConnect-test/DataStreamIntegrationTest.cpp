@@ -21,7 +21,7 @@ namespace OSHConnectTest {
 
 		TEST_METHOD_INITIALIZE(ClassInitialize) {
 			helper.createTestSystem();
-			auto system = helper.node.getSystemById(helper.systemId).value();
+			auto system = helper.node->getSystemById(helper.systemId);
 			dataStreamId = helper.createTestDataStream();
 		}
 
@@ -34,33 +34,33 @@ namespace OSHConnectTest {
 		}
 
 		TEST_METHOD(DiscoverDataStreams) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			auto dataStreams = system.discoverDataStreams();
+			auto system = helper.node->getSystemById(helper.systemId);
+			auto dataStreams = system->discoverDataStreams();
 			Assert::IsFalse(dataStreams.empty());
 		}
 
 		TEST_METHOD(GetDataStreamById) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			auto dataStreamOpt = system.getDataStreamById(dataStreamId);
-			Assert::IsTrue(dataStreamOpt.has_value());
+			auto system = helper.node->getSystemById(helper.systemId);
+			auto dataStreamOpt = system->getDataStreamById(dataStreamId);
+			Assert::IsNotNull(dataStreamOpt.get());
 		}
 
 		TEST_METHOD(RefreshDataStream) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			auto dataStreamOpt = system.getDataStreamById(dataStreamId);
-			Assert::IsTrue(dataStreamOpt.has_value());
-			auto& dataStream = dataStreamOpt.value();
+			auto system = helper.node->getSystemById(helper.systemId);
+			auto dataStreamOpt = system->getDataStreamById(dataStreamId);
+			Assert::IsNotNull(dataStreamOpt.get());
+			auto& dataStream = *dataStreamOpt;
 			bool refreshed = dataStream.refreshDataStream();
 			Assert::IsTrue(refreshed);
 		}
 
 		TEST_METHOD(DeleteDataStream) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			bool deleted = system.deleteDataStream(dataStreamId);
+			auto system = helper.node->getSystemById(helper.systemId);
+			bool deleted = system->deleteDataStream(dataStreamId);
 			Assert::IsTrue(deleted);
 			// Verify deletion
-			auto dataStreamOpt = system.getDataStreamById(dataStreamId);
-			Assert::IsFalse(dataStreamOpt.has_value());
+			auto dataStreamOpt = system->getDataStreamById(dataStreamId);
+			Assert::IsNull(dataStreamOpt.get());
 		}
 	};
 }

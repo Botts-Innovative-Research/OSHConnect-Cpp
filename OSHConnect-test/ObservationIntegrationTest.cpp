@@ -29,7 +29,7 @@ namespace OSHConnectTest {
 
 		TEST_METHOD_INITIALIZE(ClassInitialize) {
 			helper.createTestSystem();
-			auto system = helper.node.getSystemById(helper.systemId).value();
+			auto system = helper.node->getSystemById(helper.systemId);
 			dataStreamId = helper.createTestDataStream();
 		}
 
@@ -39,49 +39,49 @@ namespace OSHConnectTest {
 
 		TEST_METHOD(FetchObservations) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
-			auto& node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
-			auto system = helper.assertNotEmptyAndGetFirst(node.discoverSystems());
-			auto dataStream = helper.assertNotEmptyAndGetFirst(system.discoverDataStreams());
-			auto observations = dataStream.fetchObservations();
+			auto node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
+			auto system = helper.assertNotEmptyAndGetFirst(node->discoverSystems());
+			auto dataStream = helper.assertNotEmptyAndGetFirst(system->discoverDataStreams());
+			auto observations = dataStream->fetchObservations();
 			Assert::IsFalse(observations.empty());
 		}
 
 		TEST_METHOD(FetchObservationById) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
-			auto& node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
-			auto system = helper.assertNotEmptyAndGetFirst(node.discoverSystems());
-			auto dataStream = helper.assertNotEmptyAndGetFirst(system.discoverDataStreams());
-			auto observation = helper.assertNotEmptyAndGetFirst(dataStream.fetchObservations());
+			auto node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
+			auto system = helper.assertNotEmptyAndGetFirst(node->discoverSystems());
+			auto dataStream = helper.assertNotEmptyAndGetFirst(system->discoverDataStreams());
+			auto observation = helper.assertNotEmptyAndGetFirst(dataStream->fetchObservations());
 
 			if (observation.getId().has_value()) {
-				auto fetchedObservation = dataStream.fetchObservationById(observation.getId().value());
+				auto fetchedObservation = dataStream->fetchObservationById(observation.getId().value());
 				Assert::IsTrue(fetchedObservation.getId().has_value());
 				Assert::AreEqual(observation.getId().value(), fetchedObservation.getId().value());
 			}
 		}
 
 		TEST_METHOD(CreateObservation) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			auto dataStream = system.getDataStreamById(dataStreamId).value();
-			auto createdObservationId = createObservationAndGetId(dataStream);
+			auto system = helper.node->getSystemById(helper.systemId);
+			auto dataStream = system->getDataStreamById(dataStreamId);
+			auto createdObservationId = createObservationAndGetId(*dataStream);
 
 			Assert::IsFalse(createdObservationId.empty());
 
-			auto createdObservation = dataStream.fetchObservationById(createdObservationId);
+			auto createdObservation = dataStream->fetchObservationById(createdObservationId);
 			Assert::IsTrue(createdObservation.getId().has_value());
 			Assert::AreEqual(createdObservationId, createdObservation.getId().value());
 		}
 
 		TEST_METHOD(DeleteObservation) {
-			auto system = helper.node.getSystemById(helper.systemId).value();
-			auto dataStream = system.getDataStreamById(dataStreamId).value();
-			auto createdObservationId = createObservationAndGetId(dataStream);
+			auto system = helper.node->getSystemById(helper.systemId);
+			auto dataStream = system->getDataStreamById(dataStreamId);
+			auto createdObservationId = createObservationAndGetId(*dataStream);
 			Assert::IsFalse(createdObservationId.empty());
 
-			auto createdObservation = dataStream.fetchObservationById(createdObservationId);
+			auto createdObservation = dataStream->fetchObservationById(createdObservationId);
 			Assert::IsTrue(createdObservation.getId().has_value());
 
-			bool deleted = dataStream.deleteObservation(createdObservationId);
+			bool deleted = dataStream->deleteObservation(createdObservationId);
 			Assert::IsTrue(deleted);
 		}
 

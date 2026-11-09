@@ -28,7 +28,7 @@ namespace OSHConnectTest {
 		static constexpr std::string_view TEST_SYSTEM_UID = "test-sensor-001";
 
 		OSHConnect::OSHConnect oshConnect{ "TestOSHConnect" };
-		OSHConnect::OSHNode node{ oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin") };
+		std::shared_ptr<OSHConnect::OSHNode> node{ oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin") };
 		std::string systemId;
 
 		template<typename T>
@@ -39,7 +39,7 @@ namespace OSHConnectTest {
 
 		std::string createTestSystem() {
 			auto systemResource = createTestSystemObject();
-			systemId = node.createSystem(systemResource).value().getId();
+			systemId = node->createSystem(systemResource)->getId();
 			return systemId;
 		}
 
@@ -62,21 +62,21 @@ namespace OSHConnectTest {
 
 		void cleanupTestSystem(std::string const& id) {
 			if (!id.empty()) {
-				node.deleteSystem(id, true);
+				node->deleteSystem(id, true);
 			}
 
 			// Verify deletion
-			auto response = node.getSystemById(id);
-			if (response.has_value()) {
+			auto response = node->getSystemById(id);
+			if (response) {
 				std::cout << "Failed to clean up test system." << std::endl;
 			}
 		}
 
 		std::string createTestDataStream() {
 			auto dataStreamResource = createTestDataStreamObject();
-			auto system = node.getSystemById(systemId).value();
-			auto dataStreamOpt = system.createDataStream(dataStreamResource);
-			return dataStreamOpt.value().getId();
+			auto system = node->getSystemById(systemId);
+			auto dataStream = system->createDataStream(dataStreamResource);
+			return dataStream->getId();
 		}
 
 		ConnectedSystemsAPI::DataModels::DataStream createTestDataStreamObject() {

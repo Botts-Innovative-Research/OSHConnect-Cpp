@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 #include <optional>
 #include <string>
@@ -20,12 +22,12 @@ namespace OSHConnect::Websocket {
 		int64_t timestamp;
 		std::vector<uint8_t> data;
 		Constants::RequestFormat format;
-		OSHDataStream* dataStream;
+		std::shared_ptr<OSHDataStream> dataStream;
 
 	public:
 		StreamEventArgs(int64_t timestamp, const std::vector<uint8_t>& data,
-			Constants::RequestFormat format, OSHDataStream* dataStream)
-			: timestamp(timestamp), data(data), format(format), dataStream(dataStream) {
+			Constants::RequestFormat format, std::shared_ptr<OSHDataStream> dataStream)
+			: timestamp(timestamp), data(data), format(format), dataStream(std::move(dataStream)) {
 		}
 
 		/// <summary>
@@ -68,6 +70,6 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// The data stream that produced this event.
 		/// </summary>
-		OSHDataStream* getDataStream() const { return dataStream; }
+		const std::shared_ptr<OSHDataStream>& getDataStream() const { return dataStream; }
 	};
 }

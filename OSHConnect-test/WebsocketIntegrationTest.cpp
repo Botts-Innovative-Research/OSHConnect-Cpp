@@ -28,25 +28,25 @@ namespace OSHConnectTest
 		TEST_METHOD(OSHWebsocketTest) {
 			auto oshConnect = OSHConnect::OSHConnect("TestOSHConnect");
 			auto node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
-			auto systems = node.discoverSystems();
+			auto systems = node->discoverSystems();
 			std::string systemId;
 			for (const auto& system : systems) {
-				std::cout << "Discovered system: " + system.getSystemResource().getProperties().getName() << std::endl;
-				systemId = system.getId();
+				std::cout << "Discovered system: " + system->getSystemResource().getProperties().getName() << std::endl;
+				systemId = system->getId();
 			}
 
 			Assert::IsFalse(systemId.empty(), L"The node has no systems");
-			auto system = node.getSystemById(systemId);
-			Assert::IsTrue(system.has_value(), L"Could not get the system");
+			auto system = node->getSystemById(systemId);
+			Assert::IsNotNull(system.get(), L"Could not get the system");
 			auto dataStreams = system->discoverDataStreams();
 			std::string dataStreamId;
 			for (const auto& ds : dataStreams) {
-				std::cout << "Discovered data stream: " + ds.getDataStreamResource().getName().value_or("") << std::endl;
-				dataStreamId = ds.getId();
+				std::cout << "Discovered data stream: " + ds->getDataStreamResource().getName().value_or("") << std::endl;
+				dataStreamId = ds->getId();
 			}
 			Assert::IsFalse(dataStreamId.empty(), L"The system has no data streams");
 			auto dataStream = system->getDataStreamById(dataStreamId);
-			Assert::IsTrue(dataStream.has_value(), L"Could not get the data stream");
+			Assert::IsNotNull(dataStream.get(), L"Could not get the data stream");
 
 			auto& streamManager = oshConnect.getStreamManager();
 
@@ -73,7 +73,7 @@ namespace OSHConnectTest
 
 			try {
 				// Add data stream to handler
-				activeListener = handler->addDataStreamListener(*dataStream);
+				activeListener = handler->addDataStreamListener(dataStream);
 
 				// Connect all streams in the handler
 				handler->connect();

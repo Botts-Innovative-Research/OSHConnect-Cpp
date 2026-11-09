@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <optional>
+#include <memory>
 #include <string>
 #include <vector>
 #include <CSAPI/ConnectedSystemsAPI.h>
@@ -16,32 +16,35 @@
 namespace OSHConnect {
 	/// <summary>
 	/// Class representing an OpenSensorHub server instance or node.
+	/// Nodes are shared through std::shared_ptr (NodeManager creates them that way) and are not copyable.
+	/// A node owns the systems discovered through it; each system owns its data streams and control streams.
+	/// Children keep a weak link to their parent, and share the node's ConSysAPI, so they stay usable on their own.
 	/// </summary>
-	class OSHNode {
+	class OSHNode : public std::enable_shared_from_this<OSHNode> {
 	private:
 		std::string sensorHubRoot;
 		std::string authenticationToken;
 		bool isSecure{ false };
 		bool isBasicAuth{ false };
-		ConnectedSystemsAPI::ConSysAPI conSysAPI;
+		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
 		std::string name{ "OSH Node" };
 		std::string uniqueId;
-		std::vector<OSHSystem> systems{};
+		std::vector<std::shared_ptr<OSHSystem>> systems{};
 
 		/// <summary>
 		/// Adds a new system or updates an existing one based on the provided system resource.
 		/// </summary>
-		OSHSystem addOrUpdateSystem(const ConnectedSystemsAPI::DataModels::System& systemResource) {
+		std::shared_ptr<OSHSystem> addOrUpdateSystem(const ConnectedSystemsAPI::DataModels::System& systemResource) {
 			// Update the existing system if there is one
 			for (auto& sys : systems) {
-				if (sys.getId() == systemResource.getId()) {
-					sys.systemResource = systemResource;
+				if (sys->getId() == systemResource.getId()) {
+					sys->systemResource = systemResource;
 					return sys;
 				}
 			}
 
 			// Add a new system if not found
-			OSHSystem newSystem(this, systemResource);
+			auto newSystem = std::make_shared<OSHSystem>(weak_from_this(), conSysAPI, systemResource);
 			systems.push_back(newSystem);
 			return newSystem;
 		}
@@ -57,6 +60,10 @@ namespace OSHConnect {
 		}
 
 	public:
+		/// <summary>
+		/// Creates a node. Prefer NodeManager::addNode, which returns a shared node.
+		/// A node not owned by a std::shared_ptr still works, but its systems have no link back to it.
+		/// </summary>
 		explicit OSHNode(const std::string& root,
 			const std::string& authToken,
 			bool isBasicAuth,
@@ -66,10 +73,13 @@ namespace OSHConnect {
 			authenticationToken(authToken),
 			isSecure(root.find("https://") == 0),
 			isBasicAuth(isBasicAuth),
-			conSysAPI(ConnectedSystemsAPI::ConSysAPI(getHTTPPrefix() + getApiEndpoint(), authToken, isBasicAuth)),
+			conSysAPI(std::make_shared<ConnectedSystemsAPI::ConSysAPI>(getHTTPPrefix() + getApiEndpoint(), authToken, isBasicAuth)),
 			name(name.empty() ? "OSH Node" : name),
 			uniqueId(uniqueId.empty() ? generateIdFromRoot(sensorHubRoot) : uniqueId) {
 		}
+
+		OSHNode(const OSHNode&) = delete;
+		OSHNode& operator=(const OSHNode&) = delete;
 
 		/// <summary>
 		/// Check whether the node can be reached, serves the Connected Systems API, and accepts the credentials.
@@ -80,7 +90,7 @@ namespace OSHConnect {
 		/// <param name="timeout">Time limit for each request.</param>
 		ConnectedSystemsAPI::ConnectionStatus checkConnection(
 			std::chrono::milliseconds timeout = ConnectedSystemsAPI::ConSysAPI::DEFAULT_CONNECTION_CHECK_TIMEOUT) const {
-			return conSysAPI.checkConnection(timeout);
+			return conSysAPI->checkConnection(timeout);
 		}
 
 		/// <summary>
@@ -97,14 +107,13 @@ namespace OSHConnect {
 		/// and existing systems will have their resources updated.
 		/// </summary>
 		/// <returns>The list of discovered systems.</returns>
-		std::vector<OSHSystem> discoverSystems(std::string query = "") {
-			auto systemsResponse = conSysAPI.getSystemsAPI().getSystems(query);
-			std::vector<OSHSystem> discoveredSystems;
+		std::vector<std::shared_ptr<OSHSystem>> discoverSystems(std::string query = "") {
+			auto systemsResponse = conSysAPI->getSystemsAPI().getSystems(query);
+			std::vector<std::shared_ptr<OSHSystem>> discoveredSystems;
 
 			if (systemsResponse.isSuccessful()) {
 				for (const auto& systemResource : systemsResponse.getItems()) {
-					auto newSystem = addOrUpdateSystem(systemResource);
-					discoveredSystems.push_back(newSystem);
+					discoveredSystems.push_back(addOrUpdateSystem(systemResource));
 				}
 			}
 
@@ -117,7 +126,7 @@ namespace OSHConnect {
 		/// and existing systems will have their resources updated.
 		/// </summary>
 		/// <returns>The list of discovered systems.</returns>
-		std::vector<OSHSystem> discoverSystems(const ConnectedSystemsAPI::Query::SystemsQuery& query) {
+		std::vector<std::shared_ptr<OSHSystem>> discoverSystems(const ConnectedSystemsAPI::Query::SystemsQuery& query) {
 			return discoverSystems(query.toString());
 		}
 
@@ -125,9 +134,9 @@ namespace OSHConnect {
 		/// Create a new system on the OpenSensorHub node using the provided system resource.
 		/// </summary>
 		/// <param name="systemResource">The system resource to create.</param>
-		/// <returns>The ID of the newly created system, or std::nullopt if creation failed.</returns>
-		std::optional<OSHSystem> createSystem(const ConnectedSystemsAPI::DataModels::System& systemResource) {
-			auto response = conSysAPI.getSystemsAPI().createSystem(systemResource);
+		/// <returns>The newly created system, or nullptr if creation failed.</returns>
+		std::shared_ptr<OSHSystem> createSystem(const ConnectedSystemsAPI::DataModels::System& systemResource) {
+			auto response = conSysAPI->getSystemsAPI().createSystem(systemResource);
 
 			for (const auto& [headerKey, headerValues] : response.getHeaders()) {
 				for (const auto& headerValue : headerValues) {
@@ -143,11 +152,12 @@ namespace OSHConnect {
 					}
 				}
 			}
-			return std::nullopt;
+			return nullptr;
 		}
 
 		/// <summary>
 		/// Delete a system from the OpenSensorHub node and remove it from the list of discovered systems.
+		/// Holders of the system keep their reference, but it no longer belongs to this node.
 		/// </summary>
 		/// <param name="systemId">The ID of the system to delete.</param>
 		/// <param name="cascade">If true, all associated sub-resources hosted by the same server,
@@ -155,10 +165,10 @@ namespace OSHConnect {
 		///                       are also deleted.</param>
 		/// <returns>True if the system was successfully deleted, false otherwise.</returns>
 		bool deleteSystem(const std::string& systemId, const bool cascade = false) {
-			auto response = conSysAPI.getSystemsAPI().deleteSystem(systemId, cascade);
+			auto response = conSysAPI->getSystemsAPI().deleteSystem(systemId, cascade);
 			if (response.isSuccessful()) {
 				systems.erase(std::remove_if(systems.begin(), systems.end(),
-					[&systemId](const OSHSystem& sys) { return sys.getId() == systemId; }),
+					[&systemId](const std::shared_ptr<OSHSystem>& sys) { return sys->getId() == systemId; }),
 					systems.end());
 				return true;
 			}
@@ -171,14 +181,19 @@ namespace OSHConnect {
 		/// it will be updated with the latest resource from the server.
 		/// </summary>
 		/// <param name="systemId">The ID of the system to retrieve.</param>
-		/// <returns>An optional containing the system if found, or std::nullopt if not found.</returns>
-		std::optional<OSHSystem> getSystemById(const std::string& systemId) {
-			auto response = conSysAPI.getSystemsAPI().getSystemById(systemId);
+		/// <returns>The system, or nullptr if not found.</returns>
+		std::shared_ptr<OSHSystem> getSystemById(const std::string& systemId) {
+			auto response = conSysAPI->getSystemsAPI().getSystemById(systemId);
 			if (response.isSuccessful()) {
 				return addOrUpdateSystem(response.getItem());
 			}
-			return std::nullopt;
+			return nullptr;
 		}
+
+		/// <summary>
+		/// The systems discovered so far through this node, without querying the node.
+		/// </summary>
+		const std::vector<std::shared_ptr<OSHSystem>>& getSystems() const { return systems; }
 
 		/// <summary>
 		/// The root URL of the OpenSensorHub server, i.e., localhost:8181/sensorhub.
@@ -208,16 +223,13 @@ namespace OSHConnect {
 
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.
+		/// It is shared with the node's systems and streams.
 		/// </summary>
-		ConnectedSystemsAPI::ConSysAPI& getConSysAPI() { return conSysAPI; }
+		ConnectedSystemsAPI::ConSysAPI& getConSysAPI() const { return *conSysAPI; }
 
 		std::string getHTTPPrefix() const { return isSecure ? "https://" : "http://"; }
 		std::string getWSPrefix() const { return isSecure ? "wss://" : "ws://"; }
 		std::string getApiEndpoint() const { return Util::Utilities::joinPath(sensorHubRoot, Constants::Service::API); }
 		std::string getSystemsEndpoint() const { return Util::Utilities::joinPath(sensorHubRoot, Constants::Service::SYSTEMS); }
 	};
-
-	inline ConnectedSystemsAPI::ConSysAPI& OSHSystem::getConSysAPI() {
-		return parentNode->getConSysAPI();
-	}
 }

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
+#include <CSAPI/ConnectedSystemsAPI.h>
 #include <CSAPI/DataModels/ControlStream.h>
 #include <CSAPI/DataModels/Command.h>
 #include <CSAPI/Query/CommandsOfControlStreamQuery.h>
@@ -9,17 +11,30 @@
 namespace OSHConnect {
 	class OSHSystem;
 
+	/// <summary>
+	/// A control stream of a system on an OpenSensorHub node.
+	/// Control streams are owned by their system and shared through std::shared_ptr, so every holder sees the same,
+	/// up-to-date object. They are not copyable.
+	/// </summary>
 	class OSHControlStream {
 	private:
-		OSHSystem* parentSystem;
+		std::weak_ptr<OSHSystem> parentSystem;
+		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
 		ConnectedSystemsAPI::DataModels::ControlStream controlStreamResource;
 
 		friend class OSHSystem;
 
 	public:
-		OSHControlStream(OSHSystem* parentSystem, const ConnectedSystemsAPI::DataModels::ControlStream& controlStreamResource)
-			: parentSystem(parentSystem), controlStreamResource(controlStreamResource) {
+		/// <param name="parentSystem">The system the control stream belongs to. May be empty.</param>
+		/// <param name="conSysAPI">The API of the node the control stream is on, shared with the node.</param>
+		/// <param name="controlStreamResource">The control stream resource.</param>
+		OSHControlStream(std::weak_ptr<OSHSystem> parentSystem, std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI,
+			const ConnectedSystemsAPI::DataModels::ControlStream& controlStreamResource)
+			: parentSystem(std::move(parentSystem)), conSysAPI(std::move(conSysAPI)), controlStreamResource(controlStreamResource) {
 		}
+
+		OSHControlStream(const OSHControlStream&) = delete;
+		OSHControlStream& operator=(const OSHControlStream&) = delete;
 
 		/// <summary>
 		/// Query the node for the latest commands of this control stream with the specified parameters.
@@ -122,9 +137,13 @@ namespace OSHConnect {
 
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.
+		/// Shared with the node, so it remains usable even if the node is removed.
 		/// </summary>
-		ConnectedSystemsAPI::ConSysAPI& getConSysAPI();
+		ConnectedSystemsAPI::ConSysAPI& getConSysAPI() const { return *conSysAPI; }
 
-		OSHSystem* getParentSystem() const { return parentSystem; }
+		/// <summary>
+		/// The system the control stream belongs to, or nullptr if that system no longer exists.
+		/// </summary>
+		std::shared_ptr<OSHSystem> getParentSystem() const { return parentSystem.lock(); }
 	};
 }

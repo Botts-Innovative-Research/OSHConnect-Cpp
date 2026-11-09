@@ -68,8 +68,10 @@ namespace OSHConnectTest
 			TestHelper helper;
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto node = addNode(oshConnect, "http://127.0.0.1:" + std::to_string(port) + "/sensorhub");
-			OSHConnect::OSHSystem system(&node, helper.createTestSystemObject());
-			OSHConnect::OSHDataStream dataStream(&system,
+			// Shares ownership with the node while pointing at its API, as the node's own systems do
+			std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> api(node, &node->getConSysAPI());
+			auto system = std::make_shared<OSHConnect::OSHSystem>(node, api, helper.createTestSystemObject());
+			auto dataStream = std::make_shared<OSHConnect::OSHDataStream>(system, api,
 				ConnectedSystemsAPI::DataModels::DataStreamBuilder(helper.createTestDataStreamObject()).withId("ds1").build());
 
 			auto& streamManager = oshConnect.getStreamManager();

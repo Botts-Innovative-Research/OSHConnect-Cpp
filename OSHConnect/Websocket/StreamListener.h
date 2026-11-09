@@ -24,8 +24,6 @@
 #include "StreamStatus.h"
 #include "StreamEventArgs.h"
 #include "../OSHDataStream.h"
-#include "../OSHSystem.h"
-#include "../OSHNode.h"
 #include "../Constants/RequestFormat.h"
 #include "../Util/QueryStringBuilder.h"
 
@@ -61,7 +59,9 @@ namespace OSHConnect::Websocket {
 		static inline const std::regex dateRegexText{ R"(\d{4}-\d{2}-\d{2}T\d{2}:)" };
 		static inline const std::regex dateRegexXML{ R"(<[^>]+>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))</[^>]+>)" };
 
-		OSHDataStream dataStream;
+		// Shared with the data stream's system, so the listener can always reconnect,
+		// even if the caller no longer holds the data stream, system, or node
+		std::shared_ptr<OSHDataStream> dataStream;
 
 		// Configuration mutex protects: requestFormat, timeExtent, replaySpeed, connectionTimeout, maxReconnectAttempts
 		mutable std::mutex configMutex;
@@ -124,29 +124,25 @@ namespace OSHConnect::Websocket {
 		}
 
 		/// <summary>
+		/// The WebSocket URL for an HTTP API root: http:// becomes ws:// and https:// becomes wss://.
+		/// A root without a scheme uses ws://, matching ConSysAPI's default of http://.
+		/// </summary>
+		static std::string toWebSocketUrl(const std::string& apiRoot) {
+			if (apiRoot.rfind("https://", 0) == 0) return "wss://" + apiRoot.substr(8);
+			if (apiRoot.rfind("http://", 0) == 0) return "ws://" + apiRoot.substr(7);
+			return "ws://" + apiRoot;
+		}
+
+		/// <summary>
 		/// Validates the configuration before connecting.
 		/// </summary>
 		void validateConfiguration() const {
-			if (dataStream.getId().empty()) {
+			if (dataStream->getId().empty()) {
 				throw std::invalid_argument("DataStream ID cannot be empty");
 			}
 
-			auto const* system = dataStream.getParentSystem();
-			if (system == nullptr) {
-				throw std::invalid_argument("DataStream parent system is null");
-			}
-
-			auto const* node = system->getParentNode();
-			if (node == nullptr) {
-				throw std::invalid_argument("System parent node is null");
-			}
-
-			if (node->getWSPrefix().empty()) {
-				throw std::invalid_argument("WebSocket prefix is empty");
-			}
-
-			if (node->getApiEndpoint().empty()) {
-				throw std::invalid_argument("API endpoint is empty");
+			if (dataStream->getConSysAPI().getApiRoot().empty()) {
+				throw std::invalid_argument("API root is empty");
 			}
 
 			std::lock_guard lock(configMutex);
@@ -314,13 +310,12 @@ namespace OSHConnect::Websocket {
 			}
 
 			try {
-				auto* node = dataStream.getParentSystem()->getParentNode();
-
-				// Build the full WebSocket URL
-				std::string fullUrl = node->getWSPrefix() +
-					node->getApiEndpoint() +
+				// Build the full WebSocket URL from the API the data stream shares with its node,
+				// so connecting does not depend on the data stream's system or node still existing
+				const auto& api = dataStream->getConSysAPI();
+				std::string fullUrl = toWebSocketUrl(api.getApiRoot()) +
 					"/" + Constants::getEndpoint(Constants::Service::DATASTREAMS) + "/" +
-					dataStream.getId() + "/" +
+					dataStream->getId() + "/" +
 					Constants::getEndpoint(Constants::Service::OBSERVATIONS) +
 					buildRequestString();
 
@@ -329,10 +324,12 @@ namespace OSHConnect::Websocket {
 				// Configure the WebSocket
 				webSocket.setUrl(fullUrl);
 
-				// Authenticate the handshake with the same credentials as the node's REST requests
+				// Authenticate the handshake with the same credentials as the node's REST requests.
+				// The header is "Basic <token>" or "Bearer <token>"; send nothing if the token is empty.
 				ix::WebSocketHttpHeaders headers;
-				if (!node->getAuthenticationToken().empty()) {
-					headers["Authorization"] = node->getConSysAPI().getAuthHeader();
+				const auto& authHeader = api.getAuthHeader();
+				if (authHeader.find(' ') + 1 < authHeader.size()) {
+					headers["Authorization"] = authHeader;
 				}
 				webSocket.setExtraHeaders(headers);
 
@@ -634,8 +631,12 @@ namespace OSHConnect::Websocket {
 		/// By default, the listener will listen to the data stream in real-time.
 		/// To listen to historical data, use the setTimeExtent method.
 		/// </summary>
-		/// <param name="dataStream">The data stream to listen to.</param>
-		explicit StreamListener(const OSHDataStream & dataStream) : dataStream(dataStream) {}
+		/// <param name="dataStream">The data stream to listen to. The listener shares ownership of it.</param>
+		explicit StreamListener(std::shared_ptr<OSHDataStream> dataStream) : dataStream(std::move(dataStream)) {
+			if (!this->dataStream) {
+				throw std::invalid_argument("DataStream cannot be null");
+			}
+		}
 
 		virtual ~StreamListener() {
 			shutdown();
@@ -655,7 +656,7 @@ namespace OSHConnect::Websocket {
 		void onStreamUpdate(const std::vector<uint8_t>&data) {
 			Constants::RequestFormat format = determineRequestFormat(data);
 			int64_t timestamp = determineTimestamp(format, data);
-			onStreamUpdate(StreamEventArgs(timestamp, data, format, &dataStream));
+			onStreamUpdate(StreamEventArgs(timestamp, data, format, dataStream));
 		}
 
 		/// <summary>
@@ -919,11 +920,6 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// The data stream being listened to.
 		/// </summary>
-		OSHDataStream& getDataStream() { return dataStream; }
-
-		/// <summary>
-		/// The data stream being listened to.
-		/// </summary>
-		const OSHDataStream& getDataStream() const { return dataStream; }
+		const std::shared_ptr<OSHDataStream>& getDataStream() const { return dataStream; }
 	};
 }

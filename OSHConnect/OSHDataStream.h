@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <CSAPI/DataModels/DataStream.h>
@@ -10,17 +11,30 @@
 namespace OSHConnect {
 	class OSHSystem;
 
+	/// <summary>
+	/// A data stream of a system on an OpenSensorHub node.
+	/// Data streams are owned by their system and shared through std::shared_ptr, so every holder sees the same,
+	/// up-to-date object. They are not copyable.
+	/// </summary>
 	class OSHDataStream {
 	private:
-		OSHSystem* parentSystem;
+		std::weak_ptr<OSHSystem> parentSystem;
+		std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI;
 		ConnectedSystemsAPI::DataModels::DataStream dataStreamResource;
 
 		friend class OSHSystem;
 
 	public:
-		OSHDataStream(OSHSystem* parentSystem, const ConnectedSystemsAPI::DataModels::DataStream& dataStreamResource)
-			: parentSystem(parentSystem), dataStreamResource(dataStreamResource) {
+		/// <param name="parentSystem">The system the data stream belongs to. May be empty.</param>
+		/// <param name="conSysAPI">The API of the node the data stream is on, shared with the node.</param>
+		/// <param name="dataStreamResource">The data stream resource.</param>
+		OSHDataStream(std::weak_ptr<OSHSystem> parentSystem, std::shared_ptr<ConnectedSystemsAPI::ConSysAPI> conSysAPI,
+			const ConnectedSystemsAPI::DataModels::DataStream& dataStreamResource)
+			: parentSystem(std::move(parentSystem)), conSysAPI(std::move(conSysAPI)), dataStreamResource(dataStreamResource) {
 		}
+
+		OSHDataStream(const OSHDataStream&) = delete;
+		OSHDataStream& operator=(const OSHDataStream&) = delete;
 
 		/// <summary>
 		/// Query the node for the latest observations of this data stream with the specified parameters.
@@ -123,9 +137,13 @@ namespace OSHConnect {
 
 		/// <summary>
 		/// The ConnectedSystemsAPI instance used to communicate with the server.
+		/// Shared with the node, so it remains usable even if the node is removed.
 		/// </summary>
-		ConnectedSystemsAPI::ConSysAPI& getConSysAPI();
+		ConnectedSystemsAPI::ConSysAPI& getConSysAPI() const { return *conSysAPI; }
 
-		OSHSystem* getParentSystem() const { return parentSystem; }
+		/// <summary>
+		/// The system the data stream belongs to, or nullptr if that system no longer exists.
+		/// </summary>
+		std::shared_ptr<OSHSystem> getParentSystem() const { return parentSystem.lock(); }
 	};
 }

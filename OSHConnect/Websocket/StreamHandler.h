@@ -29,8 +29,8 @@ namespace OSHConnect::Websocket {
 			StreamHandler* handler;
 
 		public:
-			ManagedStreamListener(const OSHDataStream& dataStream, StreamHandler* handler)
-				: StreamListener(dataStream), handler(handler) {
+			ManagedStreamListener(std::shared_ptr<OSHDataStream> dataStream, StreamHandler* handler)
+				: StreamListener(std::move(dataStream)), handler(handler) {
 			}
 
 			void onStreamUpdate(const StreamEventArgs& args) override {
@@ -105,12 +105,14 @@ namespace OSHConnect::Websocket {
 		/// Also connects to the data stream if the handler is already connected.
 		/// If the data stream is already in the handler, returns the existing listener.
 		/// </summary>
-		/// <param name="dataStream">The data stream to add.</param>
-		/// <returns>Pointer to the StreamListener managing this data stream.</returns>
-		StreamListener* addDataStreamListener(const OSHDataStream& dataStream) {
+		/// <param name="dataStream">The data stream to add. The handler shares ownership of it.</param>
+		/// <returns>Pointer to the StreamListener managing this data stream, or nullptr if the data stream is null.</returns>
+		StreamListener* addDataStreamListener(const std::shared_ptr<OSHDataStream>& dataStream) {
+			if (!dataStream) return nullptr;
+
 			// Check if already exists
 			for (auto& listener : dataStreamListeners) {
-				if (listener->getDataStream().getId() == dataStream.getId()) {
+				if (listener->getDataStream()->getId() == dataStream->getId()) {
 					return listener.get();
 				}
 			}
@@ -145,7 +147,7 @@ namespace OSHConnect::Websocket {
 		bool shutdownDataStreamListener(const OSHDataStream& dataStream) {
 			auto it = std::find_if(dataStreamListeners.begin(), dataStreamListeners.end(),
 				[&dataStream](const std::unique_ptr<ManagedStreamListener>& listener) {
-				return listener->getDataStream().getId() == dataStream.getId();
+				return listener->getDataStream()->getId() == dataStream.getId();
 			});
 
 			if (it != dataStreamListeners.end()) {

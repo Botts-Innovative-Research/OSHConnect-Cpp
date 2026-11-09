@@ -20,7 +20,7 @@ namespace OSHConnectTest
 		static ConnectedSystemsAPI::ConnectionStatus check(const std::string& root) {
 			OSHConnect::OSHConnect oshConnect("TestOSHConnect");
 			auto node = oshConnect.getNodeManager().addNode(root, "admin", "admin");
-			auto status = node.checkConnection();
+			auto status = node->checkConnection();
 			Logger::WriteMessage((root + ": " + toString(status.getState()) + " (HTTP " + std::to_string(status.getResponseCode())
 				+ ") " + status.getMessage() + "\n").c_str());
 			return status;
@@ -32,8 +32,8 @@ namespace OSHConnectTest
 			auto node = oshConnect.getNodeManager().addNode("http://localhost:8282/sensorhub", "admin", "admin");
 
 			// Connected regardless of whether the node has any systems
-			Assert::IsTrue(node.isConnected());
-			Logger::WriteMessage(("Systems on the node: " + std::to_string(node.discoverSystems().size()) + "\n").c_str());
+			Assert::IsTrue(node->isConnected());
+			Logger::WriteMessage(("Systems on the node: " + std::to_string(node->discoverSystems().size()) + "\n").c_str());
 		}
 
 		TEST_METHOD(WrongPath_IsNotConnectedSystemsApi) {
