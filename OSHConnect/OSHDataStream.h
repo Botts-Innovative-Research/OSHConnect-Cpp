@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <CSAPI/DataModels/DataStream.h>
+#include <CSAPI/DataModels/DataStreamBuilder.h>
 #include <CSAPI/DataModels/Observation.h>
 #include <CSAPI/ConnectedSystemsAPI.h>
 #include <CSAPI/Query/ObservationsOfDataStreamQuery.h>
@@ -77,16 +78,31 @@ namespace OSHConnect {
 		}
 
 		/// <summary>
-		/// Refresh the data stream properties from the server.
+		/// Refresh the data stream properties and observation schema from the server.
+		/// If the schema can't be fetched, the data stream keeps the schema it had.
 		/// </summary>
 		/// <returns>True if the refresh was successful, false otherwise.</returns>
 		bool refreshDataStream() {
-			auto response = getConSysAPI().getDataStreamsAPI().getDataStreamById(getId());
-			if (response.isSuccessful()) {
-				setDataStreamResource(response.getItem());
-				return true;
+			const std::string id = getId();
+			auto response = getConSysAPI().getDataStreamsAPI().getDataStreamById(id);
+			if (!response.isSuccessful()) {
+				return false;
 			}
-			return false;
+
+			// The data stream resource doesn't include the schema, which has its own endpoint
+			ConnectedSystemsAPI::DataModels::DataStreamBuilder builder(response.getItem());
+			auto schemaResponse = getConSysAPI().getDataStreamsAPI().getObservationSchema(id);
+			if (schemaResponse.isSuccessful()) {
+				builder.withSchema(schemaResponse.getItem());
+			}
+			else if (!builder.getSchema()) {
+				auto current = getDataStreamResource();
+				if (current.getSchema()) {
+					builder.withSchema(*current.getSchema());
+				}
+			}
+			setDataStreamResource(builder.build());
+			return true;
 		}
 
 		/// <summary>

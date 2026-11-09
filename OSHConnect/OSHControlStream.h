@@ -6,6 +6,7 @@
 #include <vector>
 #include <CSAPI/ConnectedSystemsAPI.h>
 #include <CSAPI/DataModels/ControlStream.h>
+#include <CSAPI/DataModels/ControlStreamBuilder.h>
 #include <CSAPI/DataModels/Command.h>
 #include <CSAPI/Query/CommandsOfControlStreamQuery.h>
 
@@ -77,16 +78,31 @@ namespace OSHConnect {
 		}
 
 		/// <summary>
-		/// Refresh the control stream properties from the server.
+		/// Refresh the control stream properties and command schema from the server.
+		/// If the schema can't be fetched, the control stream keeps the schema it had.
 		/// </summary>
 		/// <returns>True if the refresh was successful, false otherwise.</returns>
 		bool refreshControlStream() {
-			auto response = getConSysAPI().getControlStreamsAPI().getControlStreamById(getId());
-			if (response.isSuccessful()) {
-				setControlStreamResource(response.getItem());
-				return true;
+			const std::string id = getId();
+			auto response = getConSysAPI().getControlStreamsAPI().getControlStreamById(id);
+			if (!response.isSuccessful()) {
+				return false;
 			}
-			return false;
+
+			// The control stream resource doesn't include the schema, which has its own endpoint
+			ConnectedSystemsAPI::DataModels::ControlStreamBuilder builder(response.getItem());
+			auto schemaResponse = getConSysAPI().getControlStreamsAPI().getControlStreamSchema(id);
+			if (schemaResponse.isSuccessful()) {
+				builder.withSchema(schemaResponse.getItem());
+			}
+			else if (!builder.getSchema()) {
+				auto current = getControlStreamResource();
+				if (current.getSchema()) {
+					builder.withSchema(*current.getSchema());
+				}
+			}
+			setControlStreamResource(builder.build());
+			return true;
 		}
 
 		/// <summary>

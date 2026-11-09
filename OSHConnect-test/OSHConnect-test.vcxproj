@@ -192,6 +192,7 @@
     </ClCompile>
     <ClCompile Include="QueryStringBuilderTest.cpp" />
     <ClCompile Include="ReconnectionTest.cpp" />
+    <ClCompile Include="StreamRefreshTest.cpp" />
     <ClCompile Include="SystemIntegrationTests.cpp" />
     <ClCompile Include="StreamEventArgsTest.cpp" />
     <ClCompile Include="StreamListenerTimestampTest.cpp" />

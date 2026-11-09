@@ -48,6 +48,9 @@
     <ClCompile Include="ReconnectionTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="StreamRefreshTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
     <ClCompile Include="StreamEventArgsTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
