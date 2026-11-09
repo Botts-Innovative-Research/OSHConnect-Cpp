@@ -130,7 +130,8 @@ namespace OSHConnect {
 		/// <summary>
 		/// Shutdown the data stream handler and its associated data streams,
 		/// and remove it from OSHConnect.
-		/// If the handler was created by this manager, it will be destroyed.
+		/// If the handler was created by this manager, it will be destroyed; when called from the handler's own
+		/// onStreamUpdate, that happens as soon as onStreamUpdate returns.
 		/// </summary>
 		/// <param name="handler">The handler to shutdown and remove.</param>
 		void shutdownDataStreamHandler(Websocket::StreamHandler* handler) {
@@ -148,7 +149,7 @@ namespace OSHConnect {
 					ownedHandlers.erase(it);
 				}
 			}
-			handler->shutdown();
+			release(std::move(owned), handler);
 		}
 
 		/// <summary>
@@ -165,9 +166,10 @@ namespace OSHConnect {
 				external.swap(externalHandlers);
 			}
 
-			// Shutdown owned handlers (destroyed when owned goes out of scope)
-			for (auto const& handler : owned) {
-				handler->shutdown();
+			// Shutdown and destroy owned handlers
+			for (auto& handler : owned) {
+				auto* raw = handler.get();
+				release(std::move(handler), raw);
 			}
 
 			// Shutdown external handlers (but don't delete them)
@@ -177,6 +179,20 @@ namespace OSHConnect {
 		}
 
 	private:
+		/// <summary>
+		/// Shuts the handler down, then destroys it if owned. When called from the handler's own onStreamUpdate,
+		/// the handler can't be destroyed yet, since that callback is still running on it: its delivery thread
+		/// destroys it once the callback returns.
+		/// </summary>
+		static void release(std::unique_ptr<Websocket::StreamHandler> owned, Websocket::StreamHandler* handler) {
+			const bool fromOwnUpdate = handler->isDeliveryThread();
+			handler->shutdown();
+			if (owned && fromOwnUpdate) {
+				auto* raw = owned.release();
+				raw->runAfterCurrentUpdate([raw] { delete raw; });
+			}
+		}
+
 		/// <summary>
 		/// Shutdown all data stream handlers.
 		/// Package-private method called by OSHConnect.

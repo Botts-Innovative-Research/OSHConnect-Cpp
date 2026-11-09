@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -11,11 +12,16 @@
 
 #include <CSAPI/DataModels/TimeExtent.h>
 
+#include "SerialExecutor.h"
 #include "StreamListener.h"
 #include "StreamEventArgs.h"
 #include "StreamStatus.h"
 #include "../OSHDataStream.h"
 #include "../Constants/RequestFormat.h"
+
+namespace OSHConnect {
+	class StreamManager;
+}
 
 namespace OSHConnect::Websocket {
 	/// <summary>
@@ -24,11 +30,12 @@ namespace OSHConnect::Websocket {
 	/// This class manages multiple StreamListener instances and can time-synchronize their events.
 	/// </summary>
 	/// <remarks>
-	/// Threading: all methods are thread-safe. onStreamUpdate is called on the data streams' network threads,
-	/// never on the thread that connected, but never concurrently: the handler delivers one update at a time.
-	/// Keep onStreamUpdate short (in Unreal, hand the data to the game thread), and do not add, remove, or
-	/// disconnect listeners, or shut down the handler, from inside it: that waits for the network threads,
-	/// one of which is the thread running the callback.
+	/// Threading: all methods are thread-safe. onStreamUpdate is called on the handler's own delivery thread,
+	/// one update at a time, in the order the updates arrived; the network threads only queue them.
+	/// Because that thread is not a network thread, onStreamUpdate may call any method of the handler or its
+	/// listeners, including shutdown(); StreamManager::shutdownDataStreamHandler may also be called from it,
+	/// and destroys the handler once onStreamUpdate returns.
+	/// Keep onStreamUpdate short (in Unreal, hand the data to the game thread): updates queue up while it runs.
 	/// A class deriving from StreamHandler must call shutdown() in its own destructor, so updates stop
 	/// before the derived class's members are destroyed.
 	/// </remarks>
@@ -61,16 +68,27 @@ namespace OSHConnect::Websocket {
 		double replaySpeed = 1.0;
 		StreamStatus status = StreamStatus::DISCONNECTED;
 
-		// Serializes onStreamUpdate across the listeners' network threads
-		std::mutex dispatchMutex;
+		// Delivers onStreamUpdate one update at a time, off the listeners' network threads
+		SerialExecutor dispatcher;
 		std::atomic<bool> acceptingUpdates{ true };
 
+		// Called on a listener's network thread: only queues the update, so it never waits on user code
 		void dispatchStreamUpdate(const StreamEventArgs& args) {
 			if (!acceptingUpdates) return;
-			std::lock_guard lock(dispatchMutex);
-			if (!acceptingUpdates) return;
-			onStreamUpdate(args);
+			dispatcher.post([this, args] {
+				if (acceptingUpdates) onStreamUpdate(args);
+			});
 		}
+
+		/// <summary>
+		/// Runs the function once the update being delivered returns, on the delivery thread.
+		/// Used by StreamManager to destroy a handler shut down from its own onStreamUpdate.
+		/// </summary>
+		void runAfterCurrentUpdate(std::function<void()> function) {
+			dispatcher.runOnExit(std::move(function));
+		}
+
+		friend class ::OSHConnect::StreamManager;
 
 		std::vector<std::shared_ptr<ManagedStreamListener>> listenersSnapshot() const {
 			std::lock_guard lock(mutex);
@@ -109,7 +127,7 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// Virtual method called when a data stream receives an update.
 		/// Override this method in derived classes to handle the incoming data.
-		/// Called on a network thread, one update at a time; see the class remarks.
+		/// Called on the handler's delivery thread, one update at a time; see the class remarks.
 		/// </summary>
 		/// <param name="args">The event arguments containing the data and metadata.</param>
 		virtual void onStreamUpdate(const StreamEventArgs& args) {
@@ -165,6 +183,15 @@ namespace OSHConnect::Websocket {
 				status = StreamStatus::SHUTDOWN;
 			}
 			shutdownAllDataStreamListeners();
+			// Waits for the update being delivered, unless called from it
+			dispatcher.stop();
+		}
+
+		/// <summary>
+		/// True if called from inside onStreamUpdate.
+		/// </summary>
+		bool isDeliveryThread() const {
+			return dispatcher.isCurrentThread();
 		}
 
 		/// <summary>

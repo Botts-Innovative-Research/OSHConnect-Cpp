@@ -39,6 +39,9 @@
     <ClCompile Include="ConcurrencyTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>
+    <ClCompile Include="CallbackReentryTest.cpp">
+      <Filter>Source Files\UnitTests</Filter>
+    </ClCompile>
     <ClCompile Include="QueryStringBuilderTest.cpp">
       <Filter>Source Files\UnitTests</Filter>
     </ClCompile>

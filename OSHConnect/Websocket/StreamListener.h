@@ -24,6 +24,7 @@
 #include "StreamStatus.h"
 #include "StreamEventArgs.h"
 #include "../OSHDataStream.h"
+#include "SerialExecutor.h"
 #include "../Constants/RequestFormat.h"
 #include "../Util/QueryStringBuilder.h"
 
@@ -55,9 +56,14 @@ namespace OSHConnect::Websocket {
 	/// This class is thread-safe.
 	/// </summary>
 	/// <remarks>
-	/// onStreamUpdate and status listeners are called on the listener's network thread. Keep them short
-	/// (in Unreal, hand the data to the game thread), and do not call connect, disconnect, or shutdown from
-	/// inside them: those wait for the network thread, which is the thread running the callback.
+	/// onStreamUpdate is called on the listener's network thread; status listeners are called on that thread,
+	/// or on the thread that called connect, disconnect, or shutdown. Keep them short (in Unreal, hand the data
+	/// to the game thread).
+	/// connect, disconnect, shutdown, and the setters that reconnect may be called from inside these callbacks,
+	/// for this or any other listener: they then return immediately and run on the listener's worker thread
+	/// once the callback returns, since running them in place would wait for the thread running the callback.
+	/// Errors from such a deferred connect are logged instead of thrown.
+	/// Do not destroy a listener from inside a callback; use StreamHandler::shutdownDataStreamListener instead.
 	/// A class deriving from StreamListener must call shutdown() in its own destructor, so updates stop
 	/// before the derived class's members are destroyed.
 	/// </remarks>
@@ -105,6 +111,61 @@ namespace OSHConnect::Websocket {
 		// Reconnection management
 		mutable std::mutex reconnectMutex;
 		std::unique_ptr<std::thread> reconnectThread;
+
+		// Runs connect, disconnect, shutdown, and reconnects requested from inside a callback, once it returns
+		SerialExecutor controlExecutor;
+
+		// Number of callbacks (onStreamUpdate, status listeners) of any StreamListener running on this thread
+		static inline thread_local int callbackDepth = 0;
+
+		struct CallbackScope {
+			CallbackScope() { ++callbackDepth; }
+			~CallbackScope() { --callbackDepth; }
+			CallbackScope(const CallbackScope&) = delete;
+			CallbackScope& operator=(const CallbackScope&) = delete;
+		};
+
+		/// <summary>
+		/// If called from inside a callback, queues the work on the worker thread and returns true.
+		/// Running it in place could wait for the very thread that is running the callback.
+		/// </summary>
+		bool deferIfInCallback(const char* operation, std::function<void()> work) {
+			if (callbackDepth == 0) return false;
+			controlExecutor.post([this, operation, work = std::move(work)] {
+				try {
+					work();
+				}
+				catch (const std::exception& e) {
+					log(std::string(operation) + " failed: " + e.what(), LogLevel::ERR);
+				}
+				catch (...) {
+					log(std::string(operation) + " failed: unknown error", LogLevel::ERR);
+				}
+			});
+			return true;
+		}
+
+		/// <summary>
+		/// Wakes a connect waiting for the connection, so it gives up at once after shutdown instead of at its timeout.
+		/// </summary>
+		void wakeConnectionWaiters() {
+			{
+				std::lock_guard lock(connectionMutex);
+			}
+			connectionCV.notify_all();
+		}
+
+		void disconnectNow() {
+			stopReconnectionThread();
+			std::lock_guard lock(wsMutex);
+			disconnectInternal();
+		}
+
+		void shutdownNow() {
+			stopReconnectionThread();
+			disconnectNow();
+			updateStatus(StreamStatus::SHUTDOWN);
+		}
 		std::atomic<bool> reconnectionInProgress{ false };
 
 		/// <summary>
@@ -365,6 +426,7 @@ namespace OSHConnect::Websocket {
 
 						if (!data.empty()) {
 							try {
+								CallbackScope scope;
 								onStreamUpdate(data);
 							}
 							catch (const std::exception& e) {
@@ -595,6 +657,7 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		void reconnectIfConnected() {
 			if (isShutdown) return;
+			if (deferIfInCallback("Reconnect", [this] { reconnectIfConnected(); })) return;
 
 			std::lock_guard lock(wsMutex);
 			if (connected && !isShutdown && !reconnectionInProgress) {
@@ -621,6 +684,7 @@ namespace OSHConnect::Websocket {
 			// Call listeners outside the lock to avoid deadlocks
 			for (const auto& listener : listenersCopy) {
 				try {
+					CallbackScope scope;
 					listener(newStatus);
 				}
 				catch (const std::exception& e) {
@@ -646,7 +710,12 @@ namespace OSHConnect::Websocket {
 		}
 
 		virtual ~StreamListener() {
-			shutdown();
+			isShutdown = true;
+			autoReconnect = false;
+			wakeConnectionWaiters();
+			// Waits for a deferred operation in progress, and drops the rest
+			controlExecutor.stop();
+			shutdownNow();
 			stopReconnectionThread();
 		}
 
@@ -678,11 +747,17 @@ namespace OSHConnect::Websocket {
 
 		/// <summary>
 		/// Connects to the data stream using the specified request format, replay speed, and time period.
-		/// This method blocks until the connection is established or times out.
+		/// This method blocks until the connection is established or times out, and throws if it fails;
+		/// when called from inside a callback, it returns at once and connects after the callback (see the class remarks).
 		/// Once connected, ixwebsocket handles all message processing automatically via callbacks.
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void connect() {
+			if (deferIfInCallback("Connect", [this] {
+				std::lock_guard lock(wsMutex);
+				connectInternal();
+			})) return;
+
 			std::lock_guard lock(wsMutex);
 			connectInternal();
 		}
@@ -694,10 +769,8 @@ namespace OSHConnect::Websocket {
 		void disconnect() {
 			// Stop any reconnection attempts
 			autoReconnect = false;
-			stopReconnectionThread();
-
-			std::lock_guard lock(wsMutex);
-			disconnectInternal();
+			if (deferIfInCallback("Disconnect", [this] { disconnectNow(); })) return;
+			disconnectNow();
 		}
 
 		/// <summary>
@@ -708,21 +781,21 @@ namespace OSHConnect::Websocket {
 		void shutdown() {
 			isShutdown = true;
 			autoReconnect = false;
-			stopReconnectionThread();
-			disconnect();
-			updateStatus(StreamStatus::SHUTDOWN);
+			wakeConnectionWaiters();
+			if (deferIfInCallback("Shutdown", [this] { shutdownNow(); })) return;
+			shutdownNow();
 		}
 
 		/// <summary>
 		/// Checks if the connection is active and the socket is open.
-		/// Thread-safe: can be called from multiple threads.
+		/// Thread-safe: can be called from multiple threads, and never waits for a connect or disconnect in progress.
 		/// </summary>
 		/// <returns>True if connected and socket is open, false otherwise.</returns>
 		bool isConnected() const {
 			if (isShutdown) {
 				return false;
 			}
-			std::lock_guard lock(wsMutex);
+			// Both are atomic, so no lock: wsMutex is held for the whole of a blocking connect or disconnect
 			return connected && webSocket.getReadyState() == ix::ReadyState::Open;
 		}
 

@@ -60,6 +60,9 @@
     <ClInclude Include="Websocket\StreamEventArgs.h">
       <Filter>Header Files\Websocket</Filter>
     </ClInclude>
+    <ClInclude Include="Websocket\SerialExecutor.h">
+      <Filter>Header Files\Websocket</Filter>
+    </ClInclude>
     <ClInclude Include="Websocket\StreamHandler.h">
       <Filter>Header Files\Websocket</Filter>
     </ClInclude>

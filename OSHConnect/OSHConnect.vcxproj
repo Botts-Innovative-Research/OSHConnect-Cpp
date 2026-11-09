@@ -155,6 +155,7 @@
     <ClInclude Include="Util\QueryStringBuilder.h" />
     <ClInclude Include="Util\Utilities.h" />
     <ClInclude Include="Websocket\StreamEventArgs.h" />
+    <ClInclude Include="Websocket\SerialExecutor.h" />
     <ClInclude Include="Websocket\StreamHandler.h" />
     <ClInclude Include="Websocket\StreamListener.h" />
     <ClInclude Include="Websocket\StreamStatus.h" />

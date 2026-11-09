@@ -175,6 +175,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="CallbackReentryTest.cpp" />
     <ClCompile Include="ConcurrencyTest.cpp" />
     <ClCompile Include="ControlStreamIntegrationTest.cpp" />
     <ClCompile Include="DataStreamIntegrationTest.cpp" />
