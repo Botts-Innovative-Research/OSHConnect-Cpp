@@ -85,6 +85,11 @@ namespace OSHConnect::Websocket {
 		std::atomic<bool> autoReconnect{ false };
 		int maxReconnectAttempts = 3;
 
+		// True after a successful connect, until disconnect or shutdown: whether a dropped connection should be restored
+		std::atomic<bool> wantConnected{ false };
+		// True while the listener itself closes the socket, so the resulting Close isn't mistaken for a dropped connection
+		std::atomic<bool> closingIntentionally{ false };
+
 		// WebSocket mutex protects: webSocket and connection operations
 		mutable std::mutex wsMutex;
 		ix::WebSocket webSocket;
@@ -155,6 +160,37 @@ namespace OSHConnect::Websocket {
 			connectionCV.notify_all();
 		}
 
+		/// <summary>
+		/// Stops the socket. The Close it causes is the listener's own doing, so it never triggers a reconnection.
+		/// </summary>
+		void stopSocket() {
+			closingIntentionally = true;
+			try {
+				webSocket.stop();
+			}
+			catch (...) {
+				closingIntentionally = false;
+				throw;
+			}
+			closingIntentionally = false;
+		}
+
+		/// <summary>
+		/// Starts reconnecting after an established connection dropped, if auto-reconnect is on and the
+		/// connection is still wanted.
+		/// </summary>
+		void reconnectIfWanted() {
+			if (autoReconnect && wantConnected && !isShutdown) {
+				startReconnectionThread();
+			}
+		}
+
+		void connectNow() {
+			std::lock_guard lock(wsMutex);
+			connectInternal();
+			wantConnected = true;
+		}
+
 		void disconnectNow() {
 			stopReconnectionThread();
 			std::lock_guard lock(wsMutex);
@@ -167,6 +203,23 @@ namespace OSHConnect::Websocket {
 			updateStatus(StreamStatus::SHUTDOWN);
 		}
 		std::atomic<bool> reconnectionInProgress{ false };
+
+		// Wakes the reconnection thread from its backoff delay as soon as reconnecting is no longer wanted
+		std::mutex reconnectWaitMutex;
+		std::condition_variable reconnectWaitCV;
+
+		bool reconnectionWanted() const {
+			return autoReconnect && wantConnected && !isShutdown;
+		}
+
+		void wakeReconnection() {
+			{
+				std::lock_guard lock(reconnectWaitMutex);
+			}
+			reconnectWaitCV.notify_all();
+			// An attempt may be waiting for its connection rather than in the backoff delay
+			wakeConnectionWaiters();
+		}
 
 		/// <summary>
 		/// Logs a message using the configured logger callback.
@@ -360,7 +413,9 @@ namespace OSHConnect::Websocket {
 		/// <summary>
 		/// Internal connect implementation (not thread-safe, must be called with wsMutex held).
 		/// </summary>
-		void connectInternal() {
+		/// <param name="reconnecting">True for an automatic reconnection attempt, which gives up as soon as
+		/// reconnecting is no longer wanted (disconnect, shutdown, or auto-reconnect disabled).</param>
+		void connectInternal(bool reconnecting = false) {
 			if (isShutdown) {
 				throw std::runtime_error("Listener has been shut down.");
 			}
@@ -403,6 +458,10 @@ namespace OSHConnect::Websocket {
 
 				// Enable automatic ping for connection health monitoring
 				webSocket.setPingInterval(30);  // Send ping every 30 seconds
+
+				// The listener reconnects by itself (see enableAutoReconnect). ixwebsocket's own reconnection is on by
+				// default and would keep retrying in the background, even after a failed connect has thrown.
+				webSocket.disableAutomaticReconnection();
 
 				// Set connection timeout
 				std::chrono::seconds timeout;
@@ -451,7 +510,7 @@ namespace OSHConnect::Websocket {
 						updateStatus(StreamStatus::CONNECTED);
 					}
 					else if (msg->type == ix::WebSocketMessageType::Close) {
-						connected = false;
+						const bool wasConnected = connected.exchange(false);
 						log("Connection closed: " + msg->closeInfo.reason, LogLevel::INFO);
 
 						// Notify connection waiters in case close happens during connection attempt
@@ -463,15 +522,16 @@ namespace OSHConnect::Websocket {
 
 						if (!isShutdown) {
 							updateStatus(StreamStatus::DISCONNECTED);
-							// Attempt reconnection if enabled (Issue #6 fix: managed thread)
-							if (autoReconnect && !reconnectionInProgress) {
-								startReconnectionThread();
+							// Reconnect only when an established connection dropped by itself: not when the listener
+							// closed it, and not when a connection attempt failed (connect reports that to its caller)
+							if (wasConnected && !closingIntentionally) {
+								reconnectIfWanted();
 							}
 						}
 					}
 					else if (msg->type == ix::WebSocketMessageType::Error) {
 						log("WebSocket error: " + msg->errorInfo.reason, LogLevel::ERR);
-						connected = false;
+						const bool wasConnected = connected.exchange(false);
 
 						// Notify connection waiters
 						{
@@ -482,6 +542,10 @@ namespace OSHConnect::Websocket {
 
 						if (!isShutdown) {
 							updateStatus(StreamStatus::DISCONNECTED);
+							// An error on an established connection drops it, the same as an unexpected Close
+							if (wasConnected && !closingIntentionally) {
+								reconnectIfWanted();
+							}
 						}
 					}
 					else if (msg->type == ix::WebSocketMessageType::Ping) {
@@ -495,22 +559,35 @@ namespace OSHConnect::Websocket {
 				// Start the connection
 				webSocket.start();
 
-				std::unique_lock lock(connectionMutex);
-				if (!connectionCV.wait_for(lock, timeout, [this]() {
-					return connectionAttemptComplete || isShutdown;
-				})) {
+				// Release connectionMutex before stopping the socket below: stopping joins ixwebsocket's thread,
+				// whose Open/Close/Error handlers lock connectionMutex to report the outcome
+				bool completed;
+				{
+					std::unique_lock lock(connectionMutex);
+					completed = connectionCV.wait_for(lock, timeout, [this, reconnecting]() {
+						return connectionAttemptComplete || isShutdown || (reconnecting && !reconnectionWanted());
+					});
+				}
+
+				if (!completed) {
 					// Timeout occurred
-					webSocket.stop();
+					stopSocket();
 					throw std::runtime_error("Connection timeout");
 				}
 
 				if (isShutdown) {
-					webSocket.stop();
+					stopSocket();
 					throw std::runtime_error("Connection aborted due to shutdown");
+				}
+
+				if (reconnecting && !reconnectionWanted()) {
+					stopSocket();
+					throw std::runtime_error("Reconnection cancelled");
 				}
 
 				// Check if actually connected (could have received error or close)
 				if (!connected) {
+					stopSocket();
 					throw std::runtime_error("Connection failed");
 				}
 			}
@@ -532,25 +609,23 @@ namespace OSHConnect::Websocket {
 		/// Internal disconnect implementation (not thread-safe, must be called with wsMutex held).
 		/// </summary>
 		void disconnectInternal() {
-			if (connected || webSocket.getReadyState() != ix::ReadyState::Closed) {
-				try {
-					// Stop the WebSocket - this is synchronous and waits for the internal
-					// thread to finish, but callbacks may still be queued
-					webSocket.stop();
+			const bool wasOpen = connected || webSocket.getReadyState() != ix::ReadyState::Closed;
 
-					// Brief wait to ensure all queued callbacks complete.
-					// IXWebSocket's stop() is synchronous, but OS-level socket operations
-					// and callback dispatch may still be in flight on some platforms.
-					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			// Stop the WebSocket even if it already reports closed: when the server closes the connection,
+			// ixwebsocket's thread exits but stays joinable, and start() silently does nothing until it is joined.
+			// stop() joins that thread, which is the thread that runs the callbacks, so none can still be running.
+			try {
+				stopSocket();
+			}
+			catch (const std::exception& e) {
+				log("Error during disconnect: " + std::string(e.what()), LogLevel::WARNING);
+			}
+			catch (...) {
+				log("Unknown error during disconnect", LogLevel::WARNING);
+			}
 
-					log("Disconnected", LogLevel::INFO);
-				}
-				catch (const std::exception& e) {
-					log("Error during disconnect: " + std::string(e.what()), LogLevel::WARNING);
-				}
-				catch (...) {
-					log("Unknown error during disconnect", LogLevel::WARNING);
-				}
+			if (wasOpen) {
+				log("Disconnected", LogLevel::INFO);
 				connected = false;
 				if (!isShutdown) {
 					updateStatus(StreamStatus::DISCONNECTED);
@@ -562,18 +637,18 @@ namespace OSHConnect::Websocket {
 		/// Starts a managed reconnection thread.
 		/// </summary>
 		void startReconnectionThread() {
-			// Clean up any previous reconnection thread
-			{
-				std::lock_guard lock(reconnectMutex);
-				if (reconnectThread && reconnectThread->joinable()) {
-					// Previous thread is still running, don't start another
-					return;
-				}
+			std::lock_guard lock(reconnectMutex);
+			if (reconnectionInProgress) {
+				// A reconnection is already running
+				return;
+			}
+
+			// A previous reconnection thread has finished, but stays joinable until joined
+			if (reconnectThread && reconnectThread->joinable()) {
+				reconnectThread->join();
 			}
 
 			reconnectionInProgress = true;
-
-			std::lock_guard lock(reconnectMutex);
 			reconnectThread = std::make_unique<std::thread>([this]() {
 				attemptReconnection();
 				reconnectionInProgress = false;
@@ -603,7 +678,7 @@ namespace OSHConnect::Websocket {
 		/// Attempts to reconnect with exponential backoff.
 		/// </summary>
 		void attemptReconnection() {
-			if (!autoReconnect || isShutdown) {
+			if (!autoReconnect || !wantConnected || isShutdown) {
 				return;
 			}
 
@@ -616,7 +691,7 @@ namespace OSHConnect::Websocket {
 			}
 
 			for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-				if (isShutdown || !autoReconnect) {
+				if (isShutdown || !autoReconnect || !wantConnected) {
 					break;
 				}
 
@@ -626,16 +701,20 @@ namespace OSHConnect::Websocket {
 					std::to_string(maxAttempts) + " in " +
 					std::to_string(delay.count()) + " seconds", LogLevel::INFO);
 
-				std::this_thread::sleep_for(delay);
+				// Waits for the delay, or less if disconnect, shutdown, or disabling auto-reconnect makes it moot
+				{
+					std::unique_lock lock(reconnectWaitMutex);
+					reconnectWaitCV.wait_for(lock, delay, [this] { return !reconnectionWanted(); });
+				}
 
-				if (isShutdown || !autoReconnect) {
+				if (isShutdown || !autoReconnect || !wantConnected) {
 					break;
 				}
 
 				try {
 					std::lock_guard lock(wsMutex);
-					if (!isShutdown && autoReconnect) {
-						connectInternal();
+					if (!isShutdown && autoReconnect && wantConnected) {
+						connectInternal(true);
 						log("Reconnection successful", LogLevel::INFO);
 						return;
 					}
@@ -648,7 +727,12 @@ namespace OSHConnect::Websocket {
 				}
 			}
 
-			log("Automatic reconnection failed after " + std::to_string(maxAttempts) + " attempts", LogLevel::ERR);
+			if (reconnectionWanted()) {
+				log("Automatic reconnection failed after " + std::to_string(maxAttempts) + " attempts", LogLevel::ERR);
+			}
+			else {
+				log("Automatic reconnection stopped", LogLevel::INFO);
+			}
 		}
 
 		/// <summary>
@@ -662,7 +746,14 @@ namespace OSHConnect::Websocket {
 			std::lock_guard lock(wsMutex);
 			if (connected && !isShutdown && !reconnectionInProgress) {
 				log("Reconnecting due to configuration change", LogLevel::INFO);
-				connectInternal();
+				try {
+					connectInternal();
+				}
+				catch (...) {
+					// The connection was wanted before the change, so keep trying if auto-reconnect is on
+					reconnectIfWanted();
+					throw;
+				}
 			}
 		}
 
@@ -711,7 +802,8 @@ namespace OSHConnect::Websocket {
 
 		virtual ~StreamListener() {
 			isShutdown = true;
-			autoReconnect = false;
+			wantConnected = false;
+			wakeReconnection();
 			wakeConnectionWaiters();
 			// Waits for a deferred operation in progress, and drops the rest
 			controlExecutor.stop();
@@ -753,13 +845,8 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void connect() {
-			if (deferIfInCallback("Connect", [this] {
-				std::lock_guard lock(wsMutex);
-				connectInternal();
-			})) return;
-
-			std::lock_guard lock(wsMutex);
-			connectInternal();
+			if (deferIfInCallback("Connect", [this] { connectNow(); })) return;
+			connectNow();
 		}
 
 		/// <summary>
@@ -767,8 +854,10 @@ namespace OSHConnect::Websocket {
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		void disconnect() {
-			// Stop any reconnection attempts
-			autoReconnect = false;
+			// The connection is no longer wanted, which also ends any reconnection in progress.
+			// The auto-reconnect setting itself is kept for the next connect.
+			wantConnected = false;
+			wakeReconnection();
 			if (deferIfInCallback("Disconnect", [this] { disconnectNow(); })) return;
 			disconnectNow();
 		}
@@ -780,7 +869,8 @@ namespace OSHConnect::Websocket {
 		/// </summary>
 		void shutdown() {
 			isShutdown = true;
-			autoReconnect = false;
+			wantConnected = false;
+			wakeReconnection();
 			wakeConnectionWaiters();
 			if (deferIfInCallback("Shutdown", [this] { shutdownNow(); })) return;
 			shutdownNow();
@@ -860,11 +950,15 @@ namespace OSHConnect::Websocket {
 
 		/// <summary>
 		/// Enables or disables automatic reconnection on connection loss.
+		/// When enabled, a connection that drops by itself is restored, retrying with exponential backoff
+		/// (1 s, 2 s, 4 s, ...) up to the maximum number of attempts, every time it drops.
+		/// disconnect() and shutdown() never trigger a reconnection, and the setting is kept across disconnect().
 		/// Thread-safe: can be called from multiple threads.
 		/// </summary>
 		/// <param name="enable">True to enable auto-reconnect, false to disable.</param>
 		void enableAutoReconnect(bool enable) {
 			autoReconnect = enable;
+			if (!enable) wakeReconnection();
 		}
 
 		/// <summary>
